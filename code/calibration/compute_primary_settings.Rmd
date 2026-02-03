@@ -1,0 +1,700 @@
+---
+title: "Compute primary settings"
+author: "Lucien Bickerstaff"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+# Setup
+
+```{r}
+# Seed for reproducibility
+set.seed(2025)
+
+# Libraries
+library(here)
+library(tidyverse)
+library(openxlsx)
+library(photobiology)
+library(grid)
+library(patchwork)
+library(glue)
+
+source(here("R", "plot_settings.R"))
+```
+
+# Read calibration data
+
+```{r warning=F}
+# Spectral measurements done using the Jeti (with screen), for each LED and for 
+# white light (all LED at same intensity setting), at these settings: 
+# 25, 50, 100, 200, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 3600, 4000, 4095/4095
+data <- read.xlsx(here("data", "light_calibration", "20240716_stlab_spectral_calibration_measurements_fullexport.xlsx"),
+                  colNames = F)
+# Transpose the data
+data <- as.data.frame(t(data), stringsAsFactors = FALSE)
+# Assign the first row as header
+colnames(data) <- data[1, ]
+data <- data[-1, , drop = FALSE]
+```
+
+# Extract mel EDI and photopic lux calibration information
+
+```{r warning=F, echo=TRUE, fold=FALSE}
+lux_data <- data %>% 
+  select(Name, `Ev [lx] (CIE1931 2∞)`, `X v,mel,D65 (MEDI) [lx]`) %>% 
+  mutate(
+    measurement = str_extract(Name, "(?<=#)\\d+"),
+    measurement = factor(measurement)
+  ) %>% 
+  mutate(measurement = fct_reorder(measurement, as.numeric(as.character(measurement)))) %>% 
+  select(-Name)
+
+lux_data <- lux_data %>%
+  mutate(
+    measurement_num = as.numeric(measurement),
+    across(
+      where(is.character),
+      ~ as.numeric(gsub(",", ".", .))  # convert European decimal commas
+    )
+  )
+# This converts all character columns (like "1,748E-01") into proper numeric values
+
+glimpse(lux_data)
+```
+
+# Calculate total irradiance and merge calibration data
+
+## Extract spectral data
+
+```{r warning=F, echo=TRUE, fold=FALSE}
+spectral_data <- data %>% 
+  select(c(Name, "380":"780"))
+
+spectral_data <- spectral_data %>%
+  pivot_longer(
+    cols = -1,                        # all columns except the first
+    names_to = "wavelength",          # column for wavelength names
+    values_to = "Ee [W/(sqm*nm)]"           # column for measured values
+  ) %>%
+  mutate(across(  # ensure numeric x-axis
+    -1,  # skip the first column (the names)
+    ~ as.numeric(gsub(",", ".", .))
+  )) %>% 
+  mutate(
+    measurement = str_extract(Name, "(?<=#)\\d+"),
+    measurement = factor(measurement)
+  ) %>% 
+  mutate(measurement = fct_reorder(measurement, as.numeric(as.character(measurement)))) %>% 
+  select(-Name)
+```
+
+### Control plot…
+
+```{r}
+gradient <- t(w_length2rgb(400:700))
+g <- rasterGrob(gradient, width = unit(1, "npc"), height = unit(1, "npc"), interpolate = TRUE) 
+
+ggplot(spectral_data %>% filter(measurement == 15), 
+       aes(x = wavelength, y = `Ee [W/(sqm*nm)]`)) +
+  geom_line(alpha = 0.7, linewidth = 0.8) +
+  geom_hline(yintercept = 0, color = "darkred") +
+  annotation_custom(g, xmin = -Inf, xmax = Inf, ymin = -0.1, ymax = -0.05) +
+  labs(
+    x = "Wavelength (nm)",
+    y = "Ee [W/(m²·nm)]"
+  ) +
+  ylim(-0.1, 1) +
+  theme_minimal() +
+  theme(
+    legend.position = "right"
+  ) +
+  plot_formatting
+```
+
+We calculate total irradiance as the sum of the irradiances at all wavelengths
+
+```{r warning=F, message=F, echo=TRUE, fold=FALSE}
+irradiance_data <- spectral_data %>% 
+  group_by(measurement) %>%
+  summarise(`Ee [W/(sqm)]` = sum(`Ee [W/(sqm*nm)]`), .groups = "drop")
+
+irradiance_data <- irradiance_data %>%
+  mutate(measurement_num = as.numeric(as.character(measurement)))
+
+merged_data <- left_join(
+  irradiance_data, 
+  lux_data, by = c("measurement", "measurement_num")
+  )
+
+merged_data <- merged_data %>%
+  mutate(
+    primary = case_when(
+      measurement_num >= 1   & measurement_num <= 15  ~ "1",
+      measurement_num >= 16  & measurement_num <= 30  ~ "2",
+      measurement_num >= 31  & measurement_num <= 45  ~ "3",
+      measurement_num >= 46  & measurement_num <= 60  ~ "4",
+      measurement_num >= 61  & measurement_num <= 75  ~ "5",
+      measurement_num >= 76  & measurement_num <= 90  ~ "6",
+      measurement_num >= 91  & measurement_num <= 105 ~ "7",
+      measurement_num >= 106 & measurement_num <= 120 ~ "8",
+      measurement_num >= 121 & measurement_num <= 135 ~ "9",
+      measurement_num >= 136 & measurement_num <= 150 ~ "10",
+      measurement_num >= 151 & measurement_num <= 165 ~ "all",
+      TRUE ~ NA_character_    # for the final "all off" (166)
+    ),
+    primary = factor(primary, levels = c(as.character(1:10), "all"))
+  )
+
+merged_data <- merged_data %>%
+  filter(!is.na(primary))
+
+merged_data <- merged_data %>%
+  group_by(primary) %>%
+  mutate(meas_within_primary = row_number()) %>%
+  ungroup()
+
+# map settings to the measurements
+settings_vec <- c(25, 50, 100, 200, 400, 800, 1200, 1600, 2000, 
+                  2400, 2800, 3200, 3600, 4000, 4095)
+merged_data <- merged_data %>%
+  mutate(setting = settings_vec[meas_within_primary])
+```
+
+## Control plots…
+
+```{r}
+ggplot(data=merged_data, aes(x=setting, y=`Ee [W/(sqm)]`)) +
+  geom_point() +
+  labs(title = "Irradiance") +
+  facet_wrap(~ primary) +
+  plot_formatting
+ggplot(data=merged_data, aes(x=setting, y=`Ev [lx] (CIE1931 2∞)`)) +
+  geom_point() +
+  labs(title = "Photopic illuminance") +
+  facet_wrap(~ primary) +
+  plot_formatting
+ggplot(data=merged_data, aes(x=setting, y=`X v,mel,D65 (MEDI) [lx]`)) +
+  geom_point() +
+  labs(title = "Melanopic EDI") +
+  facet_wrap(~ primary) +
+  plot_formatting
+```
+
+# Find max possible irradiance for each primary of interest
+
+```{r echo=TRUE, fold=FALSE}
+merged_data_select <- merged_data %>%
+  filter(primary %in% as.character(2:7))
+
+max_irradiance_data <- merged_data_select %>%
+  group_by(primary) %>%
+  summarise(
+    max_irr = max(`Ee [W/(sqm)]`, na.rm = TRUE)
+  )
+
+# The max possible irradiance value is the min irradiance value achievable
+# by all primaries overall
+min_irradiance <- min(max_irradiance_data$max_irr)
+min_irradiance
+```
+
+This is the maxmimum irradiance we can achieve across all primaries.
+
+# Define 4 log-spaced target irradiances 
+
+Four target irradiance values for each of the four lab visits
+
+```{r echo=TRUE, fold=FALSE}
+decrease_factor <- 150 # how much smaller the min irradiance value is compared to the max value
+
+max_val <- min_irradiance
+min_val <- max_val / decrease_factor
+n_values <- 4
+
+irradiance_levels <- exp(seq(log(max_val), log(min_val), length.out = n_values))
+irradiance_levels
+```
+
+# Interpolation of calibration data
+
+We interpolate the data so we have a [setting] -> [intensity metric] map
+
+```{r echo=TRUE, fold=FALSE}
+# Define target settings (full interpolation range)
+all_settings <- 0:4095  # start from 0 now
+
+interp_data <- merged_data %>%
+  group_by(primary) %>%
+  group_modify(~ {
+    df <- .x[order(.x$setting), ]
+
+    # Base interpolation range (0 to 4095)
+    xout <- all_settings
+
+    # --- Irradiance ---
+    Ee_fit <- spline(
+      x = df$setting,
+      y = df$`Ee [W/(sqm)]`,
+      xout = xout
+    )$y
+
+    # --- Photopic illuminance ---
+    Ev_fit <- spline(
+      x = df$setting,
+      y = df$`Ev [lx] (CIE1931 2∞)`,
+      xout = xout
+    )$y
+
+    # --- Melanopic EDI ---
+    MEDI_fit <- spline(
+      x = df$setting,
+      y = df$`X v,mel,D65 (MEDI) [lx]`,
+      xout = xout
+    )$y
+
+    # --- Linear extension to 0 ---
+    # Extrapolate linearly from first data point back to 0
+    first_x <- df$setting[1]
+    first_Ee <- df$`Ee [W/(sqm)]`[1]
+    first_Ev <- df$`Ev [lx] (CIE1931 2∞)`[1]
+    first_MEDI <- df$`X v,mel,D65 (MEDI) [lx]`[1]
+
+    # Fill any values below the first setting (should be 0–first_x)
+    Ee_fit[xout < first_x] <- (xout[xout < first_x] / first_x) * first_Ee
+    Ev_fit[xout < first_x] <- (xout[xout < first_x] / first_x) * first_Ev
+    MEDI_fit[xout < first_x] <- (xout[xout < first_x] / first_x) * first_MEDI
+
+    tibble(
+      setting = xout,
+      Ee = Ee_fit,
+      Ev = Ev_fit,
+      MEDI = MEDI_fit
+    )
+  }) %>%
+  ungroup()
+```
+
+## Control plots…
+
+```{r}
+# Irradiance
+ggplot(interp_data, aes(x = setting, y = Ee, color = primary)) +
+  geom_line() +
+  geom_point(data = merged_data, aes(y = `Ee [W/(sqm)]`), color = "black", size = 0.8) +
+  theme_minimal() +
+  facet_wrap(~ primary, scales = "free") +
+  labs(y = "Irradiance (W/m²)", title = "Interpolated Irradiance per Primary") +
+  plot_formatting
+
+# Illuminance
+ggplot(interp_data, aes(x = setting, y = Ev, color = primary)) +
+  geom_line() +
+  geom_point(data = merged_data, aes(y = `Ev [lx] (CIE1931 2∞)`), color = "black", size = 0.8) +
+  theme_minimal() +
+  facet_wrap(~ primary, scales = "free") +
+  labs(y = "Ev [lx] (CIE1931 2°)", title = "Interpolated Photopic Illuminance per Primary") +
+  plot_formatting
+
+# Melanopic EDI
+ggplot(interp_data, aes(x = setting, y = MEDI, color = primary)) +
+  geom_line() +
+  geom_point(data = merged_data, aes(y = `X v,mel,D65 (MEDI) [lx]`), color = "black", size = 0.8) +
+  theme_minimal() +
+  facet_wrap(~ primary, scales = "free") +
+  labs(y = "X v,mel,D65 (MEDI) [lx]", title = "Interpolated Melanopic EDI per Primary") +
+  plot_formatting
+```
+
+# Map target irradiance levels to needed settings for each primary
+
+Now, we just map our target irradiance levels to the desired settings…
+
+```{r warning=F, echo=TRUE, fold=FALSE}
+interp_data_all <- interp_data # keeping old df…
+
+interp_data <- interp_data %>% 
+  filter(primary != "all") %>%
+  filter(primary %in% as.character(2:7))
+
+# For each primary and each target irradiance, find the closest setting
+mapped_settings <- expand_grid(
+  primary = unique(interp_data$primary),
+  target_irr = irradiance_levels
+) %>%
+  left_join(interp_data, by = "primary") %>%
+  group_by(primary, target_irr) %>%
+  summarise(
+    # Find index of nearest irradiance to the target
+    idx = which.min(abs(Ee - target_irr)),
+
+    # Extract corresponding setting and all interpolated modalities
+    setting = setting[idx],
+    calculated_Ee = Ee[idx],
+    calculated_Ev = Ev[idx],
+    calculated_MEDI = MEDI[idx],
+    .groups = "drop"
+  ) %>%
+  group_by(primary) %>%
+  mutate(
+    lab_visit = dense_rank(target_irr),  # 1 = lowest, 4 = highest
+    lab_visit = factor(lab_visit, levels = 1:4, labels = c("1", "2", "3", "4"))
+  ) %>%
+  ungroup() %>% 
+  select(-idx)
+```
+
+# Add peak wavelength information
+
+Extracted from Spectra Tune Lab manual
+
+```{r}
+peak_nm_df <- data.frame(primary = factor(c(1:10)),
+                         peak_nm = c(430, 445, 465, 475, 505, 525, 545, 595, 640, 660),
+                         color = c("UV", "Royal blue", "Dark blue", "Blue", "Cyan", "Green", "Lime", "PC Amber", "Red", "Deep red"))
+
+mapped_settings <- mapped_settings %>% 
+  left_join(peak_nm_df, by = "primary")
+mapped_settings
+```
+
+# Calculate coverage
+
+```{r}
+irradiance_levels_log10 <- log10(mapped_settings$calculated_Ee)
+coverage <- max(irradiance_levels_log10) - min(irradiance_levels_log10)
+coverage
+```
+
+# Check settings…
+
+Here we did calibration measurements to check whether the calculated settings are as expected in terms of output
+
+```{r fig.width=5, fig.height=3}
+# calculated settings and theoretical irradiance, illuminance and mel EDI 
+theoretical <- mapped_settings
+
+# calibration data: true irradiance, illuminance and mel EDI
+measured <- read.xlsx(here("data", "light_calibration", "20251028_new_settings_all.xlsx"),
+                      colNames = F)
+
+process_spectral_measurements <- function(measured) {
+  # Transpose the data
+  measured <- as.data.frame(t(measured), stringsAsFactors = FALSE)
+  # Assign the first row as header
+  colnames(measured) <- measured[1, ]
+  measured <- measured[-1, , drop = FALSE]
+  
+  measured <- measured %>% 
+    select(Name, `Irradiance [W/sqm] (380-780nm)`, `Illuminance [lx] (CIE1931 2°)`, `X v,mel,D65 (MEDI) [lx]`) %>% 
+    mutate(
+      measurement = str_extract(Name, "(?<=#)\\d+"),
+      measurement = factor(measurement)
+    ) %>% 
+    mutate(measurement = fct_reorder(measurement, as.numeric(as.character(measurement)))) %>% 
+    select(-Name)
+  
+  measured <- measured %>%
+    mutate(
+      measurement_num = as.numeric(measurement),
+      across(
+        where(is.character),
+        ~ as.numeric(gsub(",", ".", .))  # convert European decimal commas
+      )
+    )
+  # This converts all character columns (like "1,748E-01") into proper numeric values
+  
+  measured <- measured %>%
+    mutate(
+      # Identify which repetition (1–6)
+      repetition = ceiling(measurement_num / (6 * 4)),
+  
+      # Index within repetition (1–24)
+      within_rep = measurement_num - (repetition - 1) * 24,
+  
+      # Primary assignment (2–7)
+      primary_num = case_when(
+        repetition <= 3 ~ ceiling(within_rep / 4) + 1,        # forward: 2–7
+        repetition > 3  ~ 8 - ceiling(within_rep / 4)         # reverse: 7–2
+      ),
+  
+      # Lab visit number 1–4, clean modulo form
+      lab_visit_num = ((within_rep - 1) %% 4) + 1,
+  
+      # Reverse lab visit order for reverse reps
+      lab_visit = case_when(
+        repetition <= 3 ~ as.character(lab_visit_num),         # forward: 1–4
+        repetition > 3  ~ as.character(5 - lab_visit_num)      # reverse: 4–1
+      ),
+  
+      # Final labeling
+      primary = factor(primary_num, levels = as.character(2:7)),
+      lab_visit = factor(lab_visit, levels = as.character(1:4))
+    )
+
+  plot <- measured %>% 
+    ggplot(aes(x = primary, y = `Irradiance [W/sqm] (380-780nm)`, color = lab_visit)) +
+    geom_point() +
+    scale_y_log10() +
+    theme_minimal() +
+    plot_formatting
+  
+  print(plot)
+  
+  measured_means <- measured %>% 
+    group_by(primary, lab_visit) %>% 
+    summarise(`Irradiance [W/sqm] (380-780nm)` = mean(`Irradiance [W/sqm] (380-780nm)`, na.rm = T),
+              `Illuminance [lx] (CIE1931 2°)` = mean(`Illuminance [lx] (CIE1931 2°)`, na.rm = T),
+              `X v,mel,D65 (MEDI) [lx]` = mean(`X v,mel,D65 (MEDI) [lx]`, na.rm. =T))
+  
+  merged <- measured_means %>% 
+    left_join(theoretical, by = c("primary", "lab_visit"))
+  
+  ## Calculate melanopic to photopic ratios
+  merged <- merged %>% 
+    mutate(mel_photopic_ratio = `X v,mel,D65 (MEDI) [lx]`/`Illuminance [lx] (CIE1931 2°)`)
+  
+  return(merged)
+}
+
+merged <- process_spectral_measurements(measured)
+```
+
+# Visualise differences between calculated and measured 
+
+```{r}
+plot_diff_measured <- function(df, save=F) {
+  
+  # Irradiance
+  plot_ee <- df %>% 
+    ggplot(aes(x = calculated_Ee, y = `Irradiance [W/sqm] (380-780nm)`, colour = lab_visit)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1, color = "black") +
+    facet_wrap(~ primary) +
+    scale_y_log10() +
+    scale_x_log10() +
+    labs(x = "Calculated (log10 scale)",
+         y = "Measured (log10 scale)",
+         title = "Irradiance [W/sqm] (380-780nm)") +
+    theme_minimal() +
+    plot_formatting
+
+  # Illuminance
+  plot_ev <- df %>% 
+    ggplot(aes(x = calculated_Ev, y = `Illuminance [lx] (CIE1931 2°)`, colour = lab_visit)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1, color = "black") +
+    facet_wrap(~ primary) +
+    scale_y_log10() +
+    scale_x_log10() +
+    labs(x = "Calculated (log10 scale)",
+         y = "Measured (log10 scale)",
+         title = "Illuminance [lx]") +
+    theme_minimal() +
+    plot_formatting
+  
+  # Melanopic EDI
+  plot_medi <- df %>% 
+    ggplot(aes(x = calculated_MEDI, y = `X v,mel,D65 (MEDI) [lx]`, colour = lab_visit)) +
+    geom_point() +
+    geom_abline(intercept = 0, slope = 1, color = "black") +
+    facet_wrap(~ primary) +
+    scale_y_log10() +
+    scale_x_log10() +
+    labs(x = "Calculated (log10 scale)",
+         y = "Measured (log10 scale)",
+         title = "Melanopic EDI [lx]") +
+    theme_minimal() +
+    plot_formatting
+  
+  print(plot_ee)
+  print(plot_ev)
+  print(plot_medi)
+  
+  if (save) {
+    formatted_save(here("outputs/figures", "calibration_ee_accuracy.jpg"), plot_ee)
+    formatted_save(here("outputs/figures", "calibration_ee_accuracy.jpg"), plot_ev)
+    formatted_save(here("outputs/figures", "calibration_medi_accuracy.jpg"), plot_medi)
+    
+    # save_plot(plot_ee, "calibration_ee_accuracy.jpg")
+    # save_plot(plot_ev, "calibration_ev_accuracy.jpg")
+    # save_plot(plot_medi, "calibration_medi_accuracy.jpg")
+  }
+}
+``` 
+
+```{r fig.width=5, fig.height=3}
+plot_diff_measured(merged)
+```
+
+# Visualise differences in measured metrics between primaries
+
+```{r}
+plot_diff_metrics <- function(df, save=F) {
+  # Irradiance
+  plot_ee <- df %>% 
+    ggplot(aes(x = primary, 
+               y = `Irradiance [W/sqm] (380-780nm)`, 
+               colour = lab_visit,
+               group = lab_visit)) +
+    geom_point() +
+    geom_line() +
+    scale_y_log10() +
+    scale_colour_manual(values = colorRampPalette(c("gold", "red3"))(4)) +
+    labs(title = "Irradiance",
+         y = "Irradiance [W/sqm] (380-780nm)",
+         x = "Primary",
+         colour = "Light intensity") +
+    theme_minimal() +
+    plot_formatting
+  
+  # Illuminance
+  plot_ev <- df %>% 
+    ggplot(aes(x = primary, 
+               y = `Illuminance [lx] (CIE1931 2°)`, 
+               colour = lab_visit,
+               group = lab_visit)) +
+    geom_point() +
+    geom_line() +
+    scale_y_log10() +
+    labs(title = "Illuminance",
+         y = "Illuminance [lx]",
+         x = "Primary",
+         colour = "Light intensity") +
+    theme_minimal() +
+    plot_formatting
+  
+  # Melanopic EDI
+  plot_medi <- df %>% 
+    ggplot(aes(x = primary, 
+               y = `X v,mel,D65 (MEDI) [lx]`, 
+               colour = lab_visit, 
+               group = lab_visit)) +
+    geom_point() +
+    geom_line() +
+    scale_y_log10() +
+    labs(title = "Melanopic EDI",
+         y = "Melanopic EDI [lx]",
+         x = "Primary",
+         colour = "Light intensity") +
+    theme_minimal() +
+    plot_formatting
+  
+  # Photopic vs Melanopic
+  df_long <- df %>%
+    select(primary, lab_visit, 
+           Melanopic = `X v,mel,D65 (MEDI) [lx]`, 
+           Photopic  = `Illuminance [lx] (CIE1931 2°)`) %>%
+    pivot_longer(cols = c(Melanopic, Photopic),
+                 names_to = "type",
+                 values_to = "value")
+  
+  plot_ratio_1 <- ggplot(df_long, # %>% mutate(primary = as.factor(as.numeric(primary))), 
+                         aes(x = primary, 
+                             y = value, 
+                             shape = type,
+                             linetype = type,
+                             colour = lab_visit,
+                             group = interaction(lab_visit, type))) +
+    geom_point() + 
+    geom_line() +
+    scale_y_log10() +
+    scale_colour_manual(values = colorRampPalette(c("gold", "red3"))(4)) +
+    labs(title = "Melanopic vs Photopic",
+         y = "Illuminance [lx]",
+         x = "Primary",
+         colour = "Light intensity",
+         linetype = "Type",
+         shape = "Type") +
+    theme_minimal() +
+    theme(legend.key.height = unit(0.4, "cm")) +
+    plot_formatting
+  
+  # Melanopic vs photopic ratios
+  plot_ratio_2 <- df %>% 
+    ggplot(aes(x = primary, y = mel_photopic_ratio, colour = lab_visit)) + 
+    geom_hline(yintercept = 1, colour = "darkred") +
+    # geom_text(label = "1:1 ratio", vjust = -1) +
+    geom_point() +
+    # geom_smooth() +
+    scale_y_log10() +
+    labs(title = "Melanopic vs Photopic",
+         y = "Melanopic/Photopic lux ratio (log10 scale)",
+         x = "Primary",
+         colour = "Light intensity") +
+    theme_minimal() +
+    plot_formatting
+  
+  print(plot_ee)
+  print(plot_ev)
+  print(plot_medi)
+  print(plot_ratio_1)
+  print(plot_ratio_2)
+  
+  if (save) {
+    saveRDS(plot_ee, here("outputs/figures/rds", glue("calibration_ee_metrics.rds")))
+    saveRDS(plot_ratio_1, here("outputs/figures/rds", glue("calibration_ee_medi_ratio_1.rds")))
+    
+    formatted_save(here("outputs/figures", "calibration_ee_metrics.jpg"), plot_ee)
+    formatted_save(here("outputs/figures", "calibration_ev_metrics.jpg"), plot_ev)
+    formatted_save(here("outputs/figures", "calibration_medi_metrics.jpg"), plot_medi)
+    formatted_save(here("outputs/figures", "calibration_ee_medi_ratio_1.jpg"), plot_ratio_1)
+    formatted_save(here("outputs/figures", "calibration_ee_medi_ratio_2.jpg"), plot_ratio_2)
+    # save_plot(plot_ee, "calibration_ee_metrics.jpg")
+    # save_plot(plot_ev, "calibration_ev_metrics.jpg")
+    # save_plot(plot_medi, "calibration_medi_metrics.jpg")
+    # save_plot(plot_ratio_1, "calibration_ee_medi_ratio_1.jpg", width = 4.3, height = 2.7, dpi = 300)
+    # save_plot(plot_ratio_2, "calibration_ee_medi_ratio_2.jpg")
+  }
+}
+```
+
+```{r fig.width=5, fig.height=3}
+plot_diff_metrics(merged)
+```
+
+We see that for the second lab visit, the irradiance is not matched…
+So, we manually correct it and check with new spectral measurements
+
+```{r fig.width=5, fig.height=3}
+final_settings <- merged %>% 
+  select(-c(`Irradiance [W/sqm] (380-780nm)`,
+            `Illuminance [lx] (CIE1931 2°)`,
+            `X v,mel,D65 (MEDI) [lx]`,
+            calculated_Ee,
+            calculated_Ev,
+            calculated_MEDI))
+
+spec_data_updated <- read.xlsx(here("data", "light_calibration", "20251105_corrected_settings.xlsx"),
+                               colNames = F)
+
+spec_data_updated <- process_spectral_measurements(spec_data_updated)
+
+# Update the settings from the old DF that have been manually adjusted
+spec_data_updated <- spec_data_updated %>% 
+  mutate(
+    setting = case_when(lab_visit == 2 & primary == 2 ~ 128,
+                        lab_visit == 2 & primary == 3 ~ 142,
+                        lab_visit == 2 & primary == 4 ~ 156,
+                        lab_visit == 2 & primary == 5 ~ 166,
+                        lab_visit == 2 & primary == 6 ~ 174,
+                        lab_visit == 2 & primary == 7 ~ 115,
+                        TRUE ~ setting)
+)
+
+plot_diff_measured(spec_data_updated, save = T)
+plot_diff_metrics(spec_data_updated, save = T)
+```
+
+There is a discrepancy between what is calculated initially and what is true.
+Main thing is that the irradiance is constant across primaries, and well log-spaced between lab visits.
+
+# Save design matrix
+
+```{r}
+write.csv2(spec_data_updated, here("outputs", "design_matrix.csv"), row.names = F)
+```
+
+```{r}
+sessionInfo()
+```
