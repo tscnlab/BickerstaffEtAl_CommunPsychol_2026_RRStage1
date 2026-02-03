@@ -1,0 +1,29 @@
+{
+    "light_conditions": {
+      "0": {
+        "melanopic_edi": 0,
+        "photopic_lux": 0
+      },
+      "1": {
+        "melanopic_edi": 392,
+        "photopic_lux": 486
+      },
+      "2": {
+        "melanopic_edi": 912,
+        "photopic_lux": 1074
+      },
+      "3": {
+        "melanopic_edi": 1967,
+        "photopic_lux": 2420
+      },
+      "4": {
+        "melanopic_edi": 3906,
+        "photopic_lux": 4532
+      },
+      "5": {
+        "melanopic_edi": 8408,
+        "photopic_lux": 9822
+      }
+    }
+  }
+  

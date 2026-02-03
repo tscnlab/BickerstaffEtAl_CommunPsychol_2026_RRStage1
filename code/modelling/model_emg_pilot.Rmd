@@ -28,7 +28,7 @@ library(MuMIn)
 
 ```{r}
 # Import EMG activity data
-emg_data <- read_csv(here("data", "emg", "emg_pilot_data.csv"))
+emg_data <- read_csv(here("data", "emg_pilot_data.csv"))
 
 # create muscle specific response columns
 data <- emg_data %>% 
