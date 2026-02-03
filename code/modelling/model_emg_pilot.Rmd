@@ -137,7 +137,7 @@ You can see where our data are by the small lines sticking up from the x-axis
 The model including is.zero is a better fit. We drop participant-dependent slopes as they prevent models from converging.
 
 ```{r}
-saveRDS(model1, here("outputs", "models", "emg_lmm.rds"))
+saveRDS(model1, here("outputs", "emg_lmm.rds"))
 ```
 
 # Manuscript-ready outputs
@@ -150,7 +150,7 @@ tab_model(
   show.r2 = TRUE,       # pseudo-R² if available
   pred.labels = c("Intercept", "is.zeroTRUE", "log_mel_edi"),
   dv.labels = "emg_response",
-  file = here("outputs", "models", "model_table.html")
+  file = here("outputs", "model_table.html")
 )
 
 coef_table <- tidy(model1, effects = "fixed", conf.int = TRUE)
