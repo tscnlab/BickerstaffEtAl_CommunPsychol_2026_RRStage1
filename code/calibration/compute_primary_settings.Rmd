@@ -630,12 +630,11 @@ plot_diff_metrics <- function(df, save=F) {
   if (save) {
     saveRDS(plot_ee, here("outputs", "figures", "rds", glue("calibration_ee_metrics.rds")))
     saveRDS(plot_ratio_1, here("outputs", "figures", "rds", glue("calibration_ee_medi_ratio_1.rds")))
-    
-    formatted_save(here("outputs", "figures", "calibration_ee_metrics.jpg"), plot_ee)
-    formatted_save(here("outputs", "figures", "calibration_ev_metrics.jpg"), plot_ev)
-    formatted_save(here("outputs", "figures", "calibration_medi_metrics.jpg"), plot_medi)
-    formatted_save(here("outputs", "figures", "calibration_ee_medi_ratio_1.jpg"), plot_ratio_1)
-    formatted_save(here("outputs", "figures", "calibration_ee_medi_ratio_2.jpg"), plot_ratio_2)
+    # formatted_save(here("outputs", "figures", "calibration_ee_metrics.jpg"), plot_ee)
+    # formatted_save(here("outputs", "figures", "calibration_ev_metrics.jpg"), plot_ev)
+    # formatted_save(here("outputs", "figures", "calibration_medi_metrics.jpg"), plot_medi)
+    # formatted_save(here("outputs", "figures", "calibration_ee_medi_ratio_1.jpg"), plot_ratio_1)
+    # formatted_save(here("outputs", "figures", "calibration_ee_medi_ratio_2.jpg"), plot_ratio_2)
   }
 }
 ```
@@ -673,12 +672,46 @@ spec_data_updated <- spec_data_updated %>%
                         TRUE ~ setting)
 )
 
-plot_diff_measured(spec_data_updated, save = T)
+plot_diff_measured(spec_data_updated)
 plot_diff_metrics(spec_data_updated, save = T)
 ```
 
 There is a discrepancy between what is calculated initially and what is true.
 Main thing is that the irradiance is constant across primaries, and well log-spaced between lab visits.
+
+# Create and save final plot
+
+```{r}
+# import plots
+plot_ee <- readRDS(here("outputs/figures/rds", "calibration_ee_metrics.rds"))
+plot_ratio <- readRDS(here("outputs/figures/rds", "calibration_ee_medi_ratio_1.rds"))
+
+plot_ee
+plot_ratio
+```
+
+```{r}
+plot_ee_2 <- plot_ee + 
+  labs(title = expression(bold("A ") * "Irradiance")) + 
+  scale_y_log10(breaks = breaks, minor_breaks = minor_breaks) +
+  guides(colour = "none") +
+  plot_formatting
+plot_ee_2
+
+plot_ratio_2 <- plot_ratio +
+  labs(title = expression(bold("B ") * "Melanopic vs Photopic")) + 
+  scale_y_log10(breaks = breaks, minor_breaks = minor_breaks) +
+  plot_formatting
+plot_ratio_2
+
+plot_all <-plot_ee_2 + plot_ratio_2
+plot_all
+```
+
+```{r}
+formatted_save(here("outputs/figures", "calibration_light_metrics.png"), plot_all)
+saveRDS(plot_all, here("outputs", "figures", "rds", glue("calibration_light_metrics.rds")))
+```
 
 # Save design matrix
 
