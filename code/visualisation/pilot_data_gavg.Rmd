@@ -1,0 +1,126 @@
+---
+title: "Pilot data, group averages"
+author: "Lucien Bickerstaff"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+# Seed for reproducibility
+set.seed(2025)
+
+# Libraries
+library(here)
+library(tidyverse)
+library(glue)
+library(patchwork)
+
+source(here("R", "plot_settings.R"))
+```
+
+These show the group average trace data for the maxmimum light condition (8408 Mel EDI)
+
+## EMG trace
+
+For orbicularis oculi muscle
+
+```{r}
+emg_data <- read_csv(here("data", "emg_pilot_data_gavg.csv"))
+
+plot_emg <- ggplot(emg_data, aes(x = time_sec, y = mean_trace, group = participant_id)) +
+    geom_line(color = "black") +
+    geom_rect(data = shaded_region_yellow,
+              aes(xmin = xmin + delay, xmax = xmax + delay, ymin = ymin, ymax = ymax),
+              fill = "yellow", alpha = 0.2, inherit.aes = FALSE) +
+    geom_rect(data = shaded_region_orange,
+              aes(xmin = xmin + delay, xmax = xmax + delay, ymin = ymin, ymax = ymax),
+              fill = "orange", alpha = 0.2, inherit.aes = FALSE) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "red", label = "Light onset") +
+    geom_ribbon(aes(x = time_sec, ymin = mean_trace - sd, ymax = mean_trace + sd),
+                fill = "black", alpha = 0.2, inherit.aes = FALSE) +
+    # Horizontal reference line at 0
+    geom_hline(yintercept = 100, color = "darkred", alpha = 0.3) +
+    # ylim(0, 1000) +
+    xlim(-10, 55) +
+    labs(title = "Facial OO-EMG",
+         x = "Time (s)", y = "Activity (% of baseline)") +
+    theme_minimal() +
+    theme(strip.text.x = element_text(face = "bold"),
+          strip.text.y = element_text(angle = 0, hjust = 0),
+          axis.text.x = element_text(size = 6),
+          axis.text.y = element_text(size = 6),
+          panel.grid.minor = element_blank()) +
+  plot_formatting
+print(plot_emg)
+```
+
+## Pupil traces
+
+```{r}
+pupil_data <- read_csv(here("data", "pupil_pilot_data_gavg.csv"))
+
+plot_pupil <- ggplot(pupil_data, aes(x = (sample/60)-10, y = mean_trace, group = participant_id)) +
+    geom_line(color = "black") +
+    geom_rect(data = shaded_region_yellow,
+              aes(xmin = xmin + delay, xmax = xmax + delay, ymin = ymin, ymax = ymax),
+              fill = "yellow", alpha = 0.2, inherit.aes = FALSE) +
+    geom_rect(data = shaded_region_orange,
+              aes(xmin = xmin + delay, xmax = xmax + delay, ymin = ymin, ymax = ymax),
+              fill = "orange", alpha = 0.2, inherit.aes = FALSE) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "red", label = "Light onset") +
+    geom_ribbon(aes(x = (sample/60)-10, ymin = mean_trace - sd, ymax = mean_trace + sd),
+                fill = "black", alpha = 0.2, inherit.aes = FALSE) +
+    # Horizontal reference line at 0
+    geom_hline(yintercept = 100, color = "darkred", alpha = 0.3) +
+    # ylim(0, 1000) +
+    xlim(-10, 55) +
+    labs(title = "Pupillary Light Reflex (PLR)",
+         x = "Time (s)", y = "Pupil size (% of baseline)") +
+    theme_minimal() +
+    theme(strip.text.x = element_text(face = "bold"),
+          strip.text.y = element_text(angle = 0, hjust = 0),
+          axis.text.x = element_text(size = 6),
+          axis.text.y = element_text(size = 6),
+          panel.grid.minor = element_blank()) +
+  plot_formatting
+print(plot_pupil)
+```
+
+## Rating data
+
+```{r}
+rating_data <- read_csv(here("data", "ratings_pilot_data_gavg.csv"))
+
+plot_ratings <- ggplot(rating_data, aes(x = melanopic_edi, y = mean_rating_vd)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = mean_rating_vd - sd_rating_vd,
+                    ymax = mean_rating_vd + sd_rating_vd),
+                width = 0.1) +
+  geom_smooth(method = "lm", colour = "red") +
+  scale_x_log10() +
+  ylim(0, 7) +
+  labs(title = "Reported visual discomfort",
+         x = "Melanopic EDI (lux)", y = "Mean rating (1-7)") +
+  theme_minimal() +
+    theme(strip.text.x = element_text(face = "bold"),
+          strip.text.y = element_text(angle = 0, hjust = 0),
+          axis.text.x = element_text(size = 6),
+          axis.text.y = element_text(size = 6),
+          panel.grid.minor = element_blank()) +
+  plot_formatting
+print(plot_ratings)
+```
+
+```{r}
+plot_all <- plot_emg + plot_pupil + plot_ratings
+plot_all
+```
+
+```{r}
+formatted_save(here("outputs", "figures", "pilot_data_gavg.jpg"), plot = plot_all, height = 3)
+saveRDS(plot_all, here("outputs", "figures", "rds", "pilot_data_gavg.rds"))
+```
+
+```{r}
+sessionInfo()
+```
