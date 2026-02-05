@@ -74,7 +74,7 @@ plot_pupil <- ggplot(pupil_data, aes(x = (sample/60)-10, y = mean_trace, group =
     geom_hline(yintercept = 100, color = "darkred", alpha = 0.3) +
     # ylim(0, 1000) +
     xlim(-10, 55) +
-    labs(title = "Pupillary Light Reflex (PLR)",
+    labs(title = "Pupillometry",
          x = "Time (s)", y = "Pupil size (% of baseline)") +
     theme_minimal() +
     theme(strip.text.x = element_text(face = "bold"),
