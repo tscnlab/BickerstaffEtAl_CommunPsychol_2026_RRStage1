@@ -4,3 +4,7 @@
 .Ruserdata
 
 .DS_Store
+
+# These files are too big to be committed…
+outputs/figures/rds/preprocessing_emg.rds
+outputs/figures/rds/preprocessing_demo_pupil.rds
