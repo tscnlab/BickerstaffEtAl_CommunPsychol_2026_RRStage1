@@ -46,6 +46,8 @@ Repository for the manuscript, data and code related to the PCI RR Stage 1 submi
 
 All R package dependencies are managed using [`renv`](https://rstudio.github.io/renv/).
 
+The code was tested on MacOS 15.7.3 using R 4.4.0, and on Windows 11 Enterprise 24H2 using R 4.4.0.
+
 ---
 
 ## Reproducing the analyses
