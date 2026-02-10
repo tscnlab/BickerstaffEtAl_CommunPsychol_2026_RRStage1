@@ -22,6 +22,7 @@ library(mgcv)
 library(sjPlot)
 library(broom.mixed)
 library(MuMIn)
+library(see)
 
 source(here("R", "helpers.R"))
 ```
