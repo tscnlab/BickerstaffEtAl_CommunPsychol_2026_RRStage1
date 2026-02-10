@@ -14,7 +14,7 @@ Exploratory analyses:
 
 3. Sex differences:
 
-Sex differences will be investigated for each of the modalities.
+- Sex differences will be investigated for each of the modalities.
 
 4. Clustering of data
 
