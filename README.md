@@ -31,6 +31,7 @@ Repository for the manuscript, data and code related to the PCI RR Stage 1 submi
 ├── outputs/                                 # All code outputs (figures, design matrix, model, BFDA results)
 ├── manuscript_stage1/                       # Stage 1 manuscript file
 ├── visual_asbtract/                         # Visual abstract figure file
+├── checklists/                              # ENLIGHT checklist
 ├── exploratory_analyses.md                  # Planned exploratory analyses
 ├── renv.lock                                # R package dependency lockfile
 ├── BickerstaffEtAl_PCIRRStage1_2026.Rproj   # RStudio project file
