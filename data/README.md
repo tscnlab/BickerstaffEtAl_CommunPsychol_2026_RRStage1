@@ -26,7 +26,7 @@ This folder contains:
 All calibrations were performed using the Spectraval 1511 spectrometer from JETI Technische Instrumente GmbH, Jena, Germany. The light source used is the SpectraTune Lab (Ledmotive Technologies S.L., Barcelona, Spain).
 
 - `1_calibration_reference.xlsx` is the SpectraTune Lab light source calibration data. Each condition was sampled 15 times, i.e. for each of the 10 LEDs as well as for for white light (all LEDs at same intensity setting), at these settings: 25, 50, 100, 200, 400, 800, 1200, 1600, 2000, 2400, 2800, 3200, 3600, 4000, 4095/4095. The last, 166th measurement is the spectral measurement when the light source is off (total darkness).
-- `2a_target_settings.xlsx` is the spectral measurement file for the calculated primary settings corresponding to target irradiance values. The calculated values turned out to be slightly off target so they were manually corrected;
+- `2a_target_settings.xlsx` is the spectral measurement file for the calculated primary settings corresponding to target irradiance values. The measurements were made for all 6 primaries used, for each 4 lab visits, with 6 repetitions of the measurements – the first 3 forwards (primary 2 to primary 7) and the last 3 backwards (primary 7 to primary 2). Contrary to the reference, the measurements here were made with the infrared camera on, generating radiation the infrared range. The calculated values turned out to be slightly off target so they were manually corrected;
 - `2b_target_settings_corrected.xlsx` is the spectral measurement file for the corrected primary settings corresponding to target irradiance values.
 
 ## Light condition lookup file
