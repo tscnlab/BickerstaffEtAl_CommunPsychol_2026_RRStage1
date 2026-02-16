@@ -1,0 +1,317 @@
+---
+title: "Pilot study – SPD"
+author: "Lucien Bickerstaff"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r render-time-1, include=FALSE}
+# Record how long it took to render the file
+.render_start <- Sys.time()
+```
+
+```{r setup, warning=F, message=F}
+# Seed for reproducibility
+set.seed(2025)
+
+# Libraries
+library(here)
+library(openxlsx)
+library(photobiology)
+library(tidyverse)
+library(grid)
+library(scales)
+
+source(here("R", "helpers.R"))
+source(here("R", "plot_settings.R"))
+```
+
+```{r}
+# ---- Helpers (place once, above Pilot/Main) ----
+
+read_spd_xlsx_long <- function(path_xlsx) {
+  read.xlsx(path_xlsx) %>%
+    t() %>%
+    as.data.frame(stringsAsFactors = FALSE) %>%
+    { colnames(.) <- .[1, ]; .[-1, , drop = FALSE] } %>%
+    dplyr::select(c(Name, "380":"780")) %>%
+    pivot_longer(
+      cols      = -1,
+      names_to  = "wavelength",
+      values_to = "Ee [W/(sqm*nm)]"
+    ) %>%
+    mutate(
+      across(
+        -1,
+        ~ as.numeric(gsub(",", ".", .))
+      ),
+      measurement     = str_extract(Name, "(?<=#)\\d+"),
+      measurement     = factor(measurement),
+      measurement     = fct_reorder(measurement, as.numeric(as.character(measurement))),
+      measurement_num = as.numeric(measurement)
+    ) %>%
+    select(-Name)
+}
+
+strip_zeros <- function(x) {
+  x[abs(x) < 1e-12] <- 0
+  sub("\\.?0+$", "", format(x, scientific = FALSE, digits = 12))
+}
+
+# Colour scale (once)
+wavelength_seq <- 380:780
+spectrum_cols <- sapply(wavelength_seq, w_length2rgb)
+
+gradient_scale <- scale_colour_gradientn(
+  colours = spectrum_cols,
+  values  = scales::rescale(wavelength_seq),
+  name    = "Wavelength (nm)"
+)
+
+# Manual peak wavelengths (from the product manual) (once)
+primary_wavelengths <- c("2" = 445, "3" = 465, "4" = 475, "5" = 505, "6" = 525, "7" = 545)
+
+label_data <- data.frame(
+  primary    = names(primary_wavelengths),
+  wavelength = as.numeric(primary_wavelengths),
+  label_y    = 1.08
+)
+
+```
+
+
+```{r}
+# ---- Pilot: import + tidy ----
+pilot_spd_long <- read_spd_xlsx_long(
+  here("data", "light_source_calibration", "3_pilot_settings.xlsx")
+)
+
+# ---- Pilot: plot data ----
+pilot_plot_data <- pilot_spd_long %>%
+  group_by(measurement_num) %>%
+  mutate(Ee_norm = `Ee [W/(sqm*nm)]` / max(`Ee [W/(sqm*nm)]`, na.rm = TRUE))
+
+# Vector of melanopic EDI values (ordered by measurement number)
+mel_edi_values <- c(0, 392, 912, 1967, 3906, 8408)
+
+pilot_plot_data <- pilot_plot_data %>%
+  mutate(
+    melanopic_edi = factor(
+      mel_edi_values[measurement_num],
+      levels = mel_edi_values
+    )
+  )
+
+# ---- Pilot: plots ----
+pilot_plot_spd_norm <- ggplot(
+  pilot_plot_data %>% dplyr::filter(measurement_num != 1),
+  aes(x = wavelength, y = Ee_norm, colour = melanopic_edi, group = measurement_num)
+) +
+  geom_line(alpha = 0.7, linewidth = 0.8) +
+  geom_hline(yintercept = 0, colour = "darkred") +
+  scale_colour_manual(values = colorRampPalette(c("gold", "red3"))(5)) +
+  scale_y_continuous(
+    breaks = seq(0, 1, by = 0.2),
+    limits = c(0, 1.08),
+    labels = function(x) ifelse(x %% 1 == 0, formatC(x, format = "f", digits = 0), x)
+  ) +
+  labs(
+    x = "Wavelength (nm)",
+    y = "Relative spectral irradiance",
+    title = "SPD, normalised (pilot study)",
+    colour = "Melanopic EDI (lx)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.margin = margin(t = 10, r = 10, b = 25, l = 10),
+    axis.text.x = element_text(margin = margin(t = 5))
+  ) +
+  plot_formatting
+
+##
+
+pilot_plot_spd_abs <- ggplot(
+  pilot_plot_data %>% dplyr::filter(measurement_num != 1),
+  aes(x = wavelength, y = `Ee [W/(sqm*nm)]`, colour = melanopic_edi, group = measurement_num)
+) +
+  geom_line(alpha = 0.7, linewidth = 0.8) +
+  geom_hline(yintercept = 0, colour = "darkred") +
+  scale_colour_manual(values = colorRampPalette(c("gold", "red3"))(5)) +
+  scale_y_continuous(
+    trans = pseudo_log_trans(base = 10, sigma = 1e-3),
+    breaks = c(0, 0.001, 0.01, 0.1, 1),
+    minor_breaks = minor_breaks,
+    labels = strip_zeros
+  ) +
+  labs(
+    x = "Wavelength (nm)",
+    y = expression("Spectral irradiance (W m"^{-2}*" nm"^{-1}*")"),
+    title = "SPD (pilot study)",
+    colour = "Melanopic EDI (lx)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.margin = margin(t = 10, r = 10, b = 25, l = 10),
+    axis.text.x = element_text(margin = margin(t = 5))
+  ) +
+  plot_formatting
+
+pilot_plot_spd_norm
+pilot_plot_spd_abs
+
+```
+
+```{r}
+# ---- Main: import + tidy ----
+main_spd_long <- read_spd_xlsx_long(
+  here("data", "light_source_calibration", "2b_target_settings_corrected.xlsx")
+)
+
+# ---- Main: derive labels ----
+main_spd_long <- main_spd_long %>%
+  mutate(
+    repetition = ceiling(measurement_num / (6 * 4)),
+    within_rep = measurement_num - (repetition - 1) * 24,
+
+    primary_num = case_when(
+      repetition <= 3 ~ ceiling(within_rep / 4) + 1,  # forward: 2–7
+      repetition > 3  ~ 8 - ceiling(within_rep / 4)   # reverse: 7–2
+    ),
+
+    lab_visit_num = ((within_rep - 1) %% 4) + 1,
+
+    lab_visit = case_when(
+      repetition <= 3 ~ as.character(lab_visit_num),     # forward: 1–4
+      repetition > 3  ~ as.character(5 - lab_visit_num)  # reverse: 4–1
+    ),
+
+    primary   = factor(primary_num, levels = as.character(2:7)),
+    lab_visit = factor(lab_visit, levels = as.character(1:4))
+  )
+
+# ---- Main: summarise + normalise ----
+main_plot_data <- main_spd_long %>%
+  group_by(wavelength, primary, lab_visit) %>%
+  summarise(Ee = mean(`Ee [W/(sqm*nm)]`, na.rm = TRUE), .groups = "drop") %>%
+  group_by(primary, lab_visit) %>%
+  mutate(Ee_norm = Ee / max(Ee, na.rm = TRUE)) %>%
+  ungroup()
+
+# ---- Main: plots ----
+main_plot_spd_abs <- ggplot(
+  main_plot_data,
+  aes(
+    x = wavelength, y = Ee,
+    colour = lab_visit,
+    group = interaction(lab_visit, primary)
+  )
+) +
+  geom_line(alpha = 0.7, linewidth = 0.8) +
+  geom_hline(yintercept = 0, colour = "darkred") +
+  scale_colour_manual(values = colorRampPalette(c("gold", "red3"))(4)) +
+  scale_y_continuous(
+    trans = pseudo_log_trans(base = 10, sigma = 1e-3),
+    breaks = c(0, 0.001, 0.01, 0.1, 1),
+    minor_breaks = minor_breaks,
+    labels = strip_zeros
+  ) +
+  labs(
+    x = "Wavelength (nm)",
+    y = expression("Spectral irradiance (W m"^{-2}*" nm"^{-1}*")"),
+    title = "SPD (main study)",
+    colour = "Light intensity"
+  ) +
+  facet_wrap(
+  ~ primary,
+  ncol = 2,
+  labeller = labeller(primary = function(x) paste0("Primary ", x))
+  ) +
+  theme_minimal() +
+  theme(
+    plot.margin = margin(t = 10, r = 10, b = 25, l = 10),
+    axis.text.x = element_text(margin = margin(t = 5))
+  ) +
+  plot_formatting
+
+##
+
+main_plot_spd_norm <- ggplot(
+  main_plot_data,
+  aes(
+    x = wavelength, y = Ee_norm,
+    colour = lab_visit,
+    group = interaction(lab_visit, primary)
+  )
+) +
+  geom_line(alpha = 0.7, linewidth = 0.8) +
+  geom_hline(yintercept = 0, colour = "darkred") +
+  scale_colour_manual(values = colorRampPalette(c("gold", "red3"))(4)) +
+  scale_y_continuous(
+    breaks = seq(0, 1, by = 0.2),
+    limits = c(0, 1.08),
+    labels = function(x) ifelse(x %% 1 == 0, formatC(x, format = "f", digits = 0), x)
+  ) +
+  labs(
+    x = "Wavelength (nm)",
+    y = "Relative spectral irradiance",
+    title = "SPD, normalised (main study)",
+    colour = "Light intensity"
+  ) +
+  facet_wrap(
+  ~ primary,
+  ncol = 2,
+  labeller = labeller(primary = function(x) paste0("Primary ", x))
+  ) +
+  theme_minimal() +
+  theme(
+    plot.margin = margin(t = 10, r = 10, b = 25, l = 10),
+    axis.text.x = element_text(margin = margin(t = 5))
+  ) +
+  # guides(colour = "none") +
+  plot_formatting
+
+main_plot_spd_abs
+main_plot_spd_norm
+```
+
+```{r}
+# ---- Saving ----
+save_rds_safe(
+  pilot_plot_spd_norm,
+  here("outputs", "figures", "rds", "SPD_pilot_study_norm.rds")
+)
+
+formatted_save(
+  here("outputs", "figures", "SPD_pilot_study_abs.jpg"),
+  plot = pilot_plot_spd_abs
+)
+save_rds_safe(
+  pilot_plot_spd_abs,
+  here("outputs", "figures", "rds", "SPD_pilot_study_abs.rds")
+)
+
+save_rds_safe(
+  main_plot_spd_norm,
+  here("outputs", "figures", "rds", "SPD_main_study_norm.rds")
+)
+
+formatted_save(
+  here("outputs", "figures", "SPD_main_study_abs.jpg"),
+  plot   = main_plot_spd_abs,
+  height = 7
+)
+save_rds_safe(
+  main_plot_spd_abs,
+  here("outputs", "figures", "rds", "SPD_main_study_abs.rds")
+)
+
+```
+
+```{r}
+sessionInfo()
+```
+
+```{r render-time-2, echo=FALSE}
+render_time <- Sys.time() - .render_start
+cat("Render time:", format(render_time))
+```
