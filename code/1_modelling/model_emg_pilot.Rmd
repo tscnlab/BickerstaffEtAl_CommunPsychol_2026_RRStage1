@@ -2,7 +2,10 @@
 title: "EMG modelling"
 author: "Johannes Zauner, Lucien Bickerstaff"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
 ---
 
 ```{r render-time-1, include=FALSE}
@@ -10,41 +13,138 @@ output: html_document
 .render_start <- Sys.time()
 ```
 
-```{r setup, warning=F, message=F}
+```{r setup, warning=FALSE, message=FALSE}
 # Seed for reproducibility
 set.seed(2025)
 
 # Libraries
 library(here)
 library(tidyverse)
-library(LightLogR)
-library(patchwork)
 library(lme4)
+library(glmmTMB)
+library(performance)
 library(visreg)
-library(mgcv)
-library(sjPlot)
-library(broom.mixed)
-library(MuMIn)
-library(see)
+library(emmeans)
+library(gtsummary)
+library(ggeffects)
+library(patchwork)
+library(LightLogR)
+library(scales)
 
 source(here("R", "helpers.R"))
+source(here("R", "plot_settings.R"))
 ```
 
 # EMG data
 
 ```{r}
-# Import EMG activity data
-emg_data <- read_csv(here("data", "emg_dose_resp_modelling", "emg_pilot_data_averages.csv"))
+# ------------------------------------------------------------------------------
+# Prepare trial-level EMG data for modelling
+# ------------------------------------------------------------------------------
 
-# create muscle specific response columns
-data <- emg_data %>% 
-  pivot_wider(names_from = channel,
-              values_from = emg_response, # Here we take change counts and not % of change!
-              names_prefix = "emg_response_"
-              )
+# Import trial-level EMG outcomes
+emg_data <- readRDS(
+  here::here("data", "main_data", "emg_outcomes_trial.rds")
+)
+
+# Keep the EMG channel of interest and remove calibration variables that will be
+# replaced with Luox-derived calibration estimates.
+emg_trial_data <- emg_data %>%
+  dplyr::filter(channel == 2) %>%
+  dplyr::select(
+    -melanopic_edi,
+    -illuminance,
+    -emg_trace
+  ) %>%
+  dplyr::mutate(
+    dplyr::across(
+      c(participant_id, condition),
+      factor
+    )
+  )
+
+# Import Luox-derived calibration values for each light condition.
+#
+# The calibration file is stored in a wide format where rows are measurement
+# types and columns are light conditions. The data are reshaped so that each row
+# corresponds to one experimental condition.
+calibration_data <- readr::read_csv(
+  here::here(
+    "data",
+    "light_source_calibration",
+    "3_luox_outputs",
+    "3_pilot_settings_luox.csv"
+  )
+) %>%
+  dplyr::mutate(
+    dplyr::across(
+      -Condition,
+      as.numeric
+    )
+  ) %>%
+  tidyr::pivot_longer(
+    cols = -Condition,
+    names_to = "measurement",
+    values_to = "value"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = Condition,
+    values_from = value
+  ) %>%
+  dplyr::mutate(
+    condition = factor(dplyr::row_number() - 1)
+  ) %>%
+  dplyr::select(
+    condition,
+    illuminance   = `Illuminance (lx)`,
+    rhodopic_edi  = `Rhodopic EDI (lx)`,
+    melanopic_edi = `Melanopic EDI (lx)`
+  ) %>%
+  dplyr::mutate(
+    # Treat very small measured values as the nominal 0-lx condition.
+    dplyr::across(
+      c(illuminance, rhodopic_edi, melanopic_edi),
+      ~ dplyr::if_else(.x < 1, 0, .x)
+    ),
+
+    # Rounded value used for grouping/visualisation, not modelling.
+    melanopic_edi_round = round(melanopic_edi)
+  )
+
+# Add calibrated light-source information to the trial-level EMG data.
+data <- emg_trial_data %>%
+  dplyr::left_join(
+    calibration_data,
+    by = "condition"
+  )
+
+# Create the modelling dataset.
+#
+# Rows with non-positive EMG values are excluded because log10(emg_raw) is only
+# defined for strictly positive values. For melanopic EDI, the 0-lx condition is
+# retained by using log10(pmax(melanopic_edi, 1)); this maps all values below 1 lx
+# to 0 on the log10 scale.
+model_data <- data %>%
+  dplyr::filter(
+    emg_raw > 0
+  ) %>%
+  dplyr::mutate(
+    lights_on = melanopic_edi != 0,
+
+    log_emg_raw       = log10(emg_raw),
+    log_melanopic_edi = log10(pmax(melanopic_edi, 1)),
+    log_baseline      = log10(baseline_value)
+  )
+
+# Check how many rows were excluded by the log-transform requirement.
+excluded_rows <- nrow(data) - nrow(model_data)
+
+excluded_rows
 ```
 
-## Visualize
+`excluded_rows` records how many rows were removed because one or more variables required by the log-transformed model were missing or non-positive.
+
+## Visualise
 
 ```{r}
 #| warning: false
@@ -52,26 +152,31 @@ data <- emg_data %>%
 #| fig-width: 12
 #| fig-height: 12
 
-# We take orbicularis oculi response (response_2)
 Plot_unscaled <-
-data |> 
-  ggplot(aes(y = emg_response_2, x = melanopic_edi)) +
-  geom_violin(aes(group = melanopic_edi), scale = "width") +
-  stat_summary(aes(group = melanopic_edi), fun = mean) +
-  stat_summary(aes(group = melanopic_edi), fun = median, col = "red", size = 0.5) +
-  labs(title = "Violin plots of response against stimulus with mean (black) and median (red) response\nblue: linear model with 0lx, green: linear model without 0lx") +
+  data |> 
+  ggplot(aes(y = emg_raw, x = melanopic_edi_round)) +
+  geom_violin(aes(group = melanopic_edi_round), scale = "width") +
+  stat_summary(aes(group = melanopic_edi_round), fun = mean) +
+  stat_summary(aes(group = melanopic_edi_round), fun = median, col = "red", size = 0.5) +
+  labs(
+    title = "Violin plots of response against stimulus with mean (black) and median (red) response\nblue: linear model with 0lx, green: linear model without 0lx"
+  ) +
   geom_smooth(method = "lm") +
-  geom_smooth(aes(group = melanopic_edi == 0), col = "green4", fill = "green4",
-              method = "lm")
+  geom_smooth(
+    aes(group = melanopic_edi_round == 0),
+    col = "green4",
+    fill = "green4",
+    method = "lm"
+  )
 
 Plot_scaled <- 
   Plot_unscaled +
-  scale_x_continuous(trans = "symlog", breaks = c(0,10^(0:5))) +
+  scale_x_continuous(trans = "symlog", breaks = c(0, 10^(0:5))) +
   labs(title = NULL)
 
 Plot_unscaled_log10 <-
   Plot_unscaled +
-    scale_y_log10() +
+  scale_y_log10() +
   labs(title = NULL, subtitle = "Y scaled log10")
   
 Plot_scaled_log10 <- 
@@ -79,91 +184,374 @@ Plot_scaled_log10 <-
   scale_y_log10()
 
 (Plot_unscaled + Plot_scaled) /
-(Plot_unscaled_log10 + Plot_scaled_log10)
+  (Plot_unscaled_log10 + Plot_scaled_log10)
 ```
 
 ## Model
 
-Including random intercept for pid
+### Helpers
+
+```{r}
+fit_glmmTMB <- function(formula, data) {
+  data_name <- substitute(data)
+
+  model <- glmmTMB::glmmTMB(
+    formula = formula,
+    data = data
+  )
+
+  # Make downstream functions like visreg() able to find the original data
+  model$call$data <- data_name
+
+  model
+}
+
+check_glmmTMB <- function(model) {
+  print(summary(model))
+
+  cat("\nConvergence check:\n")
+  print(performance::check_convergence(model))
+
+  cat("\nSingularity check:\n")
+  print(performance::check_singularity(model))
+
+  print(performance::check_model(model))
+
+  invisible(model)
+}
+```
+
+
+### Random effects for melanopic EDI?
 
 ```{r}
 #| fig-width: 8
 #| fig-height: 12
 
-data <- 
-data |> 
-  mutate(is.zero = melanopic_edi == 0,
-         log_mel_edi = pmax(melanopic_edi, 1) |> log10())
+form_m0 <- log_emg_raw ~
+  log_melanopic_edi +
+  lights_on
 
-m1_formula <- log10(emg_response_2) ~ is.zero + log_mel_edi + (1| participant_id)
-m0_formula <- log10(emg_response_2) ~ log_mel_edi + (1| participant_id)
-        
-model1 <- lmer(m1_formula, data   = data)
-model0 <- lmer(m0_formula, data   = data)
+m0 <- fit_glmmTMB(form_m0, model_data)
 
-summary(model1)
-summary(model0)
-
-performance::check_model(model1)
-performance::check_model(model0)
-anova(model0, model1)
+check_glmmTMB(m0)
 ```
 
 ```{r}
-visreg(model1, jitter = TRUE)
+#| fig-width: 8
+#| fig-height: 12
+
+form_m1 <- log_emg_raw ~
+  log_melanopic_edi +
+  lights_on +
+  (log_melanopic_edi | participant_id)
+
+m1 <- fit_glmmTMB(form_m1, model_data)
+
+check_glmmTMB(m1)
 ```
 
-Not a perfect fit, but good enough diagnostics. Better than the Gamma model.
+```{r}
+#| fig-width: 8
+#| fig-height: 12
 
-### Checking whether the dependency is log linear around the data
+form_m2 <- log_emg_raw ~
+  log_melanopic_edi +
+  lights_on +
+  (1 | participant_id)
 
-This is done to see whether if we free the modelling approach from the linearity assumption, does it capture non-linear behaviour that we might have overlooked?
+m2 <- fit_glmmTMB(form_m2, model_data)
+
+check_glmmTMB(m2)
+```
 
 ```{r}
-data$log_mel_shift <- log(data$melanopic_edi + 1)
+AIC(m0, m1, m2)
+```
 
-m_gamm <- gam(
-  emg_response_2 ~ s(log_mel_shift, k = 6) +
-    s(participant_id, bs = "re"),
-  family = Gamma(link = "log"),
-  data = data
+`m1` is the preferred model (lower AIC).
+Keeping random slopes is warranted here.
+
+### Include baseline?
+
+```{r}
+#| fig-width: 8
+#| fig-height: 12
+
+form_m3 <- log_emg_raw ~
+  log_melanopic_edi +
+  lights_on +
+  log_baseline +
+  (log_melanopic_edi | participant_id)
+
+m3 <- fit_glmmTMB(form_m3, model_data)
+
+check_glmmTMB(m3)
+```
+
+```{r}
+AIC(m1, m3)
+```
+
+`m3` is the preferred model.
+Including baseline is warranted here.
+
+### Include trial number?
+
+```{r}
+#| fig-width: 8
+#| fig-height: 12
+
+form_m4 <- log_emg_raw ~
+  log_melanopic_edi +
+  lights_on +
+  log_baseline +
+  trial +
+  (log_melanopic_edi | participant_id)
+
+m4 <- fit_glmmTMB(form_m4, model_data)
+
+check_glmmTMB(m4)
+```
+
+```{r}
+AIC(m3, m4)
+```
+
+`m4` is the better fit.
+Including trial number is warranted.
+
+```{r}
+#| fig-width: 8
+#| fig-height: 6
+
+visreg(m4, xvar = "log_melanopic_edi", jitter = TRUE)
+```
+
+# Predictions against actual data
+
+```{r}
+#| warning: false
+#| message: false
+#| fig-width: 8
+#| fig-height: 5
+
+# ------------------------------------------------------------------------------
+# Helper functions
+# ------------------------------------------------------------------------------
+
+make_prediction_grid <- function(data, n = 1000) {
+  # Reference values for fixed-effect predictions.
+  #
+  # These hold non-focal predictors constant while melanopic EDI varies.
+  baseline_reference <- median(data$baseline_value, na.rm = TRUE)
+  trial_reference    <- median(data$trial, na.rm = TRUE)
+
+  max_melanopic_edi <- max(data$melanopic_edi, na.rm = TRUE)
+
+  pred_df <- tibble::tibble(
+    # Include 0 manually so the lights-off condition is represented.
+    # The continuous grid starts at 0.01 because log10(0) is undefined.
+    melanopic_edi = c(
+      0,
+      10^seq(
+        from = -2,
+        to = log10(max_melanopic_edi),
+        length.out = n
+      )
+    ),
+    log_baseline = log10(baseline_reference),
+    trial = trial_reference
+  ) |>
+    dplyr::mutate(
+      lights_on = melanopic_edi != 0,
+
+      # Must match the transformation used in the model.
+      log_melanopic_edi = log10(pmax(melanopic_edi, 1))
+    )
+
+  attr(pred_df, "baseline_reference") <- baseline_reference
+  attr(pred_df, "trial_reference")    <- trial_reference
+
+  pred_df
+}
+
+
+add_fixed_effect_predictions <- function(pred_df, model) {
+  # Predictions are fixed-effect only because re.form = NA.
+  #
+  # If the outcome model is log10(emg_raw), then type = "response" returns
+  # predictions on the log10 EMG scale. We back-transform with 10^x.
+  pred_df |>
+    dplyr::mutate(
+      pred_log_emg = predict(
+        model,
+        newdata = dplyr::pick(dplyr::everything()),
+        re.form = NA,
+        type = "response"
+      ),
+      pred_emg = 10^pred_log_emg
+    )
+}
+
+
+make_pseudolog_breaks <- function(thres = 2, max_power = 5) {
+  list(
+    breaks = c(
+      0,
+      1,
+      2,
+      10^(1:max_power)
+    ),
+    minor_breaks = c(
+      0,
+      seq(1, thres, by = 0.5),
+      1:9 * 10^rep(1:max_power, each = 9)
+    )
+  )
+}
+
+
+plot_observed_vs_predicted <- function(data,
+                                       pred_df,
+                                       model_name = "m4",
+                                       thres = 2,
+                                       log_y = FALSE) {
+  # Rounded EDI is used only to group observed points and violins.
+  # Do not use this rounded variable for modelling or prediction.
+  data_plot <- data |>
+    dplyr::mutate(
+      melanopic_edi_plot = round(melanopic_edi)
+    )
+
+  x_breaks <- make_pseudolog_breaks(thres = thres)
+
+  baseline_reference <- attr(pred_df, "baseline_reference")
+  trial_reference    <- attr(pred_df, "trial_reference")
+
+  p <- data_plot |>
+    ggplot2::ggplot(
+      ggplot2::aes(
+        x = melanopic_edi_plot,
+        y = emg_raw
+      )
+    ) +
+    ggplot2::geom_point(
+      alpha = 0.35,
+      size = 1.5
+    ) +
+    ggplot2::geom_violin(
+      ggplot2::aes(group = melanopic_edi_plot),
+      scale = "width",
+      alpha = 0.25
+    ) +
+    ggplot2::stat_summary(
+      ggplot2::aes(group = melanopic_edi_plot),
+      fun = mean,
+      geom = "point",
+      colour = "black",
+      size = 2
+    ) +
+    ggplot2::stat_summary(
+      ggplot2::aes(group = melanopic_edi_plot),
+      fun = median,
+      geom = "point",
+      colour = "red",
+      size = 2
+    ) +
+    ggplot2::geom_line(
+      data = pred_df,
+      ggplot2::aes(
+        x = melanopic_edi,
+        y = pred_emg
+      ),
+      inherit.aes = FALSE,
+      linewidth = 1,
+      colour = "blue",
+      alpha = 0.7
+    ) +
+    ggplot2::scale_x_continuous(
+      trans = scales::pseudo_log_trans(
+        base = 10,
+        sigma = thres
+      ),
+      breaks = x_breaks$breaks,
+      minor_breaks = x_breaks$minor_breaks
+    ) +
+    ggplot2::labs(
+      x = "Melanopic EDI",
+      y = "Raw EMG",
+      title = "Observed data vs model prediction",
+      subtitle = paste0(
+        "Blue line: fixed-effect prediction from ", model_name, "; ",
+        "baseline EMG held at median = ", signif(baseline_reference, 3), "; ",
+        "trial held at median = ", signif(trial_reference, 3), "; ",
+        "lights_on defined as melanopic_edi != 0"
+      )
+    ) +
+    ggplot2::theme_minimal()
+
+  if (log_y) {
+    p <- p +
+      ggplot2::scale_y_log10() +
+      ggplot2::labs(
+        title = sprintf(
+          "Observed data vs model prediction, log10 y-scale, x pseudo-log thres = %s",
+          thres
+        )
+      )
+  }
+
+  p
+}
+```
+
+```{r}
+thres <- 2
+
+pred_df <- model_data |>
+  make_prediction_grid(n = 1000) |>
+  add_fixed_effect_predictions(model = m4)
+
+plot_pred_raw <- plot_observed_vs_predicted(
+  data = model_data,
+  pred_df = pred_df,
+  model_name = "m4",
+  thres = thres,
+  log_y = FALSE
 )
 
-summary(m_gamm)
-plot(m_gamm, all.terms = TRUE)
+plot_pred_log_y <- plot_observed_vs_predicted(
+  data = model_data,
+  pred_df = pred_df,
+  model_name = "m4",
+  thres = thres,
+  log_y = TRUE
+)
+
+plot_pred_raw
+plot_pred_log_y
 ```
-
-Looking good:
-
-That is a generalized additive mixed model. It does not assume a linear relationship between the variables and thus is useful if we want to assess whether a non-linear relationship agrees with our linear model - in the relevant region, that is. So if we only look to the right of the plot - that is where the non-zero Mel EDI data are. And there we don’t see relevant non-linearities, so our approach is not missing anything important.
-You can see where our data are by the small lines sticking up from the x-axis
 
 # Saving final model
 
-The model including is.zero is a better fit. We drop participant-dependent slopes as they prevent models from converging.
-
 ```{r}
-save_rds_safe(model1, here("outputs", "emg_lmm.rds"))
+final_model <- m4
+save_rds_safe(final_model, here("outputs", "emg_lmm.rds"))
 ```
 
 # Manuscript-ready outputs
 
 ```{r}
-tab_model(
-  model1,
-  show.re.var = TRUE,   # show random-effect SD/variance
-  show.icc = TRUE,      # intraclass correlation
-  show.r2 = TRUE,       # pseudo-R² if available
-  pred.labels = c("Intercept", "is.zeroTRUE", "log_mel_edi"),
-  dv.labels = "emg_response",
-  file = here("outputs", "model_table.html")
-)
+regression_table <- final_model %>%
+  tbl_regression(exponentiate = TRUE)
 
-coef_table <- tidy(model1, effects = "fixed", conf.int = TRUE)
-coef_table
+regression_table
+```
 
-r2 <- r.squaredGLMM(model1)
-r2
+```{r}
+performance::r2(final_model)
+performance::icc(final_model)
 ```
 
 ```{r}
