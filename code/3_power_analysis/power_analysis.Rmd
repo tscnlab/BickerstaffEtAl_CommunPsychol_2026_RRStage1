@@ -1,11 +1,12 @@
 ---
-title: "BFDA from pilot data model fit"
+title: "Power analysis"
 author: "Lucien Bickerstaff"
 date: "`r Sys.Date()`"
 output:
   html_document:
     toc: true
     toc_float: true
+    code_folding: hide
 ---
 
 ```{r render-time-1, include=FALSE}
@@ -13,9 +14,19 @@ output:
 .render_start <- Sys.time()
 ```
 
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+# Setup
+
 ```{r setup, warning=F, message=F}
 # Seed for reproducibility
-set.seed(2025)
+seed <- 2025
+set.seed(seed)
 
 # Libraries
 library(here)
@@ -24,6 +35,7 @@ library(broom.mixed)
 library(jsonlite)
 library(BayesFactor)
 library(lme4)
+library(glmmTMB)
 library(MASS)
 library(tidyverse)
 library(furrr)
@@ -35,19 +47,47 @@ source(here("R", "helpers.R"))
 source(here("R", "plot_settings.R"))
 ```
 
+A few notes:
+
+- We define a function to simulate data from our fitted models
+- We simulate and visualise the data
+- Because the design matrix extends to lower light levels than what we had
+during the pilot study, we have to use extrapolation. Though, this means that
+simulated data might span values that are non-physiological, e.g. lower than
+what we observed for the 0-lx condition in the pilot study. So, we tried:
+1. Flooring non-physiological data. This introduces a non-linear component that 
+is undesirable as it makes convergence harder and may not represent the actual 
+responses, so we did not choose this option
+2. Discarding non-physiological data. This is the safer option as it does not
+assume anything about the actual responses.
+- We then run a power analysis:
+1. Consider a range of sample sizes and residual noise scaling levels for 
+simulation
+2. Compare melanopic vs photopic models with AIC-based model comparison
+3. Look at proportions of comparisons favouring one, the other, or no model 
+4. Simulate 1000 datasets per comparison
+
 # Load and prepare data
 
 ## Load models
 
-We use EMG as our reference modality, as it is the most reliable and the most indicative
+We use OO-EMG as our reference modality, as it is the most reliable and the 
+most indicative based on literature (see manuscript)
 
 ```{r}
-m <- readRDS(here("outputs", "emg_lmm.rds"))
+m_mel <- readRDS(here("outputs", "models", "emg_lmm_mel.rds"))
+m_phot <- readRDS(here("outputs", "models", "emg_lmm_phot.rds"))
+m_rho <- readRDS(here("outputs", "models", "emg_lmm_rho.rds"))
+
+driver_models <- tibble::tibble(
+  driver = c("mel", "phot", "rho"),
+  model = list(m_mel, m_phot, m_rho)
+)
 ```
 
 ## Load design matrix
 
-from compute_primary_settings.Rmd
+…from `generate_design_matrix.Rmd`
 
 ```{r}
 design_matrix <- readr::read_csv(
@@ -59,31 +99,54 @@ design_matrix <- readr::read_csv(
     lab_visit = factor(lab_visit),
 
     melanopic_edi = MEDI,
+    rhodopic_edi = REDI,
 
     # Must match the transformation used when fitting the EMG model.
-    # This keeps the 0-lx condition while avoiding log10(0).
+    # Even though there is no 0-lx condition here
     log_illuminance = log10(pmax(illuminance, 1)),
     log_melanopic_edi = log10(pmax(melanopic_edi, 1)),
+    log_rhodopic_edi  = log10(pmax(rhodopic_edi, 1)),
 
     lights_on = melanopic_edi != 0,
   )
 ```
 
+Simulation matrix also needs `log_baseline`.
+
+All three models were fitted to the same EMG data, so `log_baseline` is identical 
+across model frames. So we just use one model, for example the melanopic model.
+
+We first check it though:
 
 ```{r}
-# Simulation matrix also needs `log_baseline`
+baseline_check <- driver_models %>%
+  dplyr::mutate(
+    log_baseline = purrr::map(model, ~ model.frame(.x)$log_baseline)
+  )
 
+identical(
+  baseline_check$log_baseline[[1]],
+  baseline_check$log_baseline[[2]]
+)
+
+identical(
+  baseline_check$log_baseline[[1]],
+  baseline_check$log_baseline[[3]]
+)
+```
+
+```{r}
 # -----------------------------
 # Simulate log_baseline using a shifted gamma distribution
 # -----------------------------
 
-model_frame <- model.frame(m)
+model_frame <- m_mel$frame
 
 observed_log_baseline <- model_frame$log_baseline
 observed_log_baseline <- observed_log_baseline[is.finite(observed_log_baseline)]
 
-# Shift log_baseline so all values are positive
-shift <- abs(min(observed_log_baseline)) + 0.001
+# Shift log_baseline so all values are positive, only if needed
+shift <- ifelse(min(observed_log_baseline) <= 0, abs(min(observed_log_baseline)) + 1e-7, 0)
 
 log_baseline_shifted <- observed_log_baseline + shift
 
@@ -98,8 +161,6 @@ if (!is.finite(gamma_shape) || !is.finite(gamma_rate) ||
     gamma_shape <= 0 || gamma_rate <= 0) {
   stop("Invalid shifted-gamma parameters for log_baseline.", call. = FALSE)
 }
-
-set.seed(123)
 
 design_matrix <- design_matrix %>%
   dplyr::mutate(
@@ -141,7 +202,7 @@ ggplot(plot_df, aes(x = log_baseline)) +
 simulate_from_design <- function(design_df,
                                  model,
                                  sd_scaling = 1,
-                                 seed = NULL) {
+                                 seed = seed) {
   if (!is.null(seed)) {
     set.seed(seed)
   }
@@ -380,130 +441,47 @@ simulate_from_design <- function(design_df,
   dat
 }
 
-simulated_data <- simulate_from_design(
-  design_df = design_matrix,
-  model = m,
-  sd_scaling = 1,
-  seed = 123
-)
+# simulated_data <- simulate_from_design(
+#   design_df = design_matrix,
+#   model = m,
+#   sd_scaling = 1
+# )
 ```
 
+### Visualise simulations against original data
 
 ```{r}
-vis_sim <- function(sd_scaling = 1,
-                    seed = 123,
-                    floored = TRUE,
-                    compare_floor = FALSE) {
-  
-  sim_df <- simulate_from_design(
-    design_df = design_matrix,
-    model = m,
-    sd_scaling = sd_scaling,
-    seed = seed
-  ) %>%
-    dplyr::mutate(
-      melanopic_edi_plot = pmax(melanopic_edi, 1)
-    )
-  
-  if (compare_floor) {
-    
-    plot_df <- sim_df %>%
-      tidyr::pivot_longer(
-        cols = c(simulated_emg_unfloored, simulated_emg),
-        names_to = "flooring",
-        values_to = "emg_response_plot"
-      ) %>%
-      dplyr::mutate(
-        flooring = dplyr::recode(
-          flooring,
-          simulated_emg_unfloored = "Unfloored + residual noise",
-          simulated_emg = "Floored + residual noise"
-        )
-      )
-    
-    plot_title <- glue::glue(
-      "Simulated OO-EMG response; SD scaling factor = {sd_scaling}"
-    )
-    
-    y_label <- "Simulated OO-EMG response"
-    
-  } else {
-    
-    if (floored) {
-      plot_df <- sim_df %>%
-        dplyr::mutate(
-          flooring = "Floored + residual noise",
-          emg_response_plot = simulated_emg
-        )
-    } else {
-      plot_df <- sim_df %>%
-        dplyr::mutate(
-          flooring = "Unfloored + residual noise",
-          emg_response_plot = simulated_emg_unfloored
-        )
-    }
-    
-    plot_title <- glue::glue(
-      "{unique(plot_df$flooring)}; SD scaling factor = {sd_scaling}"
-    )
-    
-    y_label <- "Simulated OO-EMG response"
-  }
-  
-  p <- plot_df %>%
-    ggplot2::ggplot(
-      ggplot2::aes(
-        x = melanopic_edi_plot,
-        y = emg_response_plot,
-        colour = participant_id
-      )
-    ) +
-    ggplot2::geom_point(alpha = 0.5) +
-    ggplot2::geom_smooth(
-      ggplot2::aes(colour = NULL),
-      method = "lm",
-      se = TRUE,
-      color = "black"
-    ) +
-    ggplot2::scale_x_log10(breaks = breaks, minor_breaks = minor_breaks) +
-    ggplot2::scale_y_log10(breaks = breaks, minor_breaks = minor_breaks) +
-    ggplot2::labs(
-      x = "Melanopic EDI, lux",
-      y = y_label,
-      colour = "Participant",
-      title = plot_title
-    ) +
-    ggplot2::theme_minimal()
-  
-  if (compare_floor) {
-    p <- p +
-      ggplot2::facet_wrap(~ flooring)
-  }
-  
-  print(p)
-}
-
-# changing variance in the data
-vis_sim(sd_scaling = 0.1, floored = TRUE)
-vis_sim(sd_scaling = 0.5, floored = TRUE)
-vis_sim(sd_scaling = 1, floored = TRUE)
-vis_sim(sd_scaling = 5, floored = TRUE)
-
-vis_sim(sd_scaling = 1, floored = FALSE)
-
-vis_sim(sd_scaling = 1, compare_floor = TRUE)
-```
-
-```{r}
-vis_sim_vs_original <- function(sd_scaling = 1,
-                                seed = 123,
+vis_sim_vs_original <- function(model,
+                                driver = c("mel", "phot", "rho"),
+                                sd_scaling = 1,
+                                sim_seed = seed,
                                 facet = FALSE) {
   
-  model_frame <- model.frame(m)
+  driver <- match.arg(driver)
+  
+  x_log_var <- dplyr::case_when(
+    driver == "mel" ~ "log_melanopic_edi",
+    driver == "rho" ~ "log_rhodopic_edi",
+    driver == "phot" ~ "log_illuminance"
+  )
+  
+  x_raw_var <- dplyr::case_when(
+    driver == "mel" ~ "melanopic_edi",
+    driver == "rho" ~ "rhodopic_edi",
+    driver == "phot" ~ "illuminance"
+  )
+  
+  x_label <- dplyr::case_when(
+    driver == "mel" ~ "Melanopic EDI",
+    driver == "rho" ~ "Rhodopic EDI",
+    driver == "phot" ~ "Illuminance"
+  )
+  
+  model_frame <- model$frame
   
   baseline_floor_log10 <- mean(
     predict(
-      m,
+      model,
       newdata = model_frame %>%
         dplyr::mutate(lights_on = as.logical(lights_on)) %>%
         dplyr::filter(!lights_on),
@@ -519,19 +497,17 @@ vis_sim_vs_original <- function(sd_scaling = 1,
   original_df <- model_frame %>%
     dplyr::mutate(
       lights_on = as.logical(lights_on),
-      
-      melanopic_edi_plot = dplyr::if_else(
+      x_plot = dplyr::if_else(
         lights_on,
-        10^log_melanopic_edi,
+        10^.data[[x_log_var]],
         0
       ),
-      
       emg_response_plot = 10^log_emg_raw,
       source = "Original data",
       floored = FALSE
     ) %>%
     dplyr::select(
-      melanopic_edi_plot,
+      x_plot,
       emg_response_plot,
       lights_on,
       floored,
@@ -540,12 +516,12 @@ vis_sim_vs_original <- function(sd_scaling = 1,
   
   sim_df <- simulate_from_design(
     design_df = design_matrix,
-    model = m,
+    model = model,
     sd_scaling = sd_scaling,
-    seed = seed
+    seed = sim_seed
   ) %>%
     dplyr::mutate(
-      melanopic_edi_plot = melanopic_edi,
+      x_plot = .data[[x_raw_var]],
       lights_on = as.logical(lights_on)
     )
   
@@ -563,7 +539,7 @@ vis_sim_vs_original <- function(sd_scaling = 1,
       )
     ) %>%
     dplyr::select(
-      melanopic_edi_plot,
+      x_plot,
       emg_response_plot,
       lights_on,
       floored,
@@ -582,26 +558,13 @@ vis_sim_vs_original <- function(sd_scaling = 1,
           "Simulated, no floor",
           "Simulated, floor"
         )
-      )
-    ) %>%
-    dplyr::mutate(
-      smooth_group = dplyr::case_when(
-        source == "Simulated, floor" & floored ~ "Simulated, floor: floored",
-        source == "Simulated, floor" & !floored ~ "Simulated, floor: not floored",
-        TRUE ~ as.character(source)
-      )
-    ) %>% 
-    dplyr::mutate(
+      ),
       point_colour_group = dplyr::case_when(
         source == "Simulated, floor" & floored ~ "Simulated, floor — floored",
         source == "Simulated, floor" & !floored ~ "Simulated, floor — not floored",
         TRUE ~ as.character(source)
       ),
-      smooth_group = dplyr::case_when(
-        source == "Simulated, floor" & floored ~ "Simulated, floor — floored",
-        source == "Simulated, floor" & !floored ~ "Simulated, floor — not floored",
-        TRUE ~ as.character(source)
-      )
+      smooth_group = point_colour_group
     )
   
   smooth_df <- plot_df %>%
@@ -610,7 +573,7 @@ vis_sim_vs_original <- function(sd_scaling = 1,
     )
   
   baseline_label_df <- tibble::tibble(
-    melanopic_edi_plot = 1,
+    x_plot = 1,
     emg_response_plot = baseline_floor_emg,
     label = "floor",
     source = factor(
@@ -626,7 +589,7 @@ vis_sim_vs_original <- function(sd_scaling = 1,
   p <- ggplot2::ggplot(
     plot_df,
     ggplot2::aes(
-      x = melanopic_edi_plot,
+      x = x_plot,
       y = emg_response_plot,
       colour = point_colour_group
     )
@@ -642,7 +605,7 @@ vis_sim_vs_original <- function(sd_scaling = 1,
     ggplot2::geom_text(
       data = baseline_label_df,
       ggplot2::aes(
-        x = melanopic_edi_plot,
+        x = x_plot,
         y = emg_response_plot,
         label = label
       ),
@@ -674,7 +637,7 @@ vis_sim_vs_original <- function(sd_scaling = 1,
       values = c(
         "Original data" = "black",
         "Simulated, no floor" = "darkgreen",
-        "Simulated, floor — not floored" = "darkgreen",
+        "Simulated, floor — not floored" = "orange",
         "Simulated, floor — floored" = "darkred"
       ),
       breaks = c(
@@ -686,16 +649,16 @@ vis_sim_vs_original <- function(sd_scaling = 1,
       labels = c(
         "Original data",
         "Simulated, no floor",
-        "Simulated, floor: not floored",
-        "Simulated, floor: floored"
+        "Simulated, floor: unfloored data",
+        "Simulated, floor: floored data"
       )
     ) +
     ggplot2::labs(
-      x = "Melanopic EDI, lux",
+      x = x_label,
       y = "OO-EMG response",
       colour = NULL,
       title = glue::glue(
-        "Original model-fitting data vs simulated data; SD scaling factor = {sd_scaling}"
+        "Original model-fitting data vs simulated data; driver = {driver}; SD scaling factor = {sd_scaling}"
       )
     ) +
     ggplot2::theme_minimal()
@@ -706,20 +669,35 @@ vis_sim_vs_original <- function(sd_scaling = 1,
       ggplot2::guides(colour = "none")
   }
   
-  print(p)
+  return(p)
 }
 
-# Same plot, different colours
-vis_sim_vs_original(sd_scaling = 1)
+noise_levels <- c(0.1, 1, 5)
 
-# Faceted version
-vis_sim_vs_original(sd_scaling = 0.01, facet = TRUE)
+sim_vs_original_plots <- driver_models %>%
+  tidyr::crossing(sd_scaling = noise_levels) %>%
+  dplyr::mutate(
+    plot = purrr::pmap(
+      list(model, driver, sd_scaling),
+      ~ vis_sim_vs_original(
+        model = ..1,
+        driver = ..2,
+        sd_scaling = ..3,
+        facet = TRUE
+      )
+    )
+  )
+
+purrr::walk(sim_vs_original_plots$plot, print)
 ```
 
-# Collinearity of melanopic EDI and illuminance
+To make it clear, for the power analysis, we will only use the yellow part
+of the plots above, i.e. exclude the non-physiological data
 
-We first look at collinearity of melanopic EDI and illuminance
-If high collinearity, we cannot have both predictors in the same model
+# Collinearity of predictors
+
+We first look at collinearity of melanopic EDI, illuminance and rhodopic EDI
+If high collinearity, we cannot have all predictors in the same model…
 
 ```{r}
 #| fig-width: 8
@@ -729,23 +707,31 @@ design_matrix %>%
   dplyr::filter(MEDI > 0, illuminance > 0) %>%
   dplyr::summarise(
     cor_raw = cor(illuminance, MEDI),
-    cor_log = cor(log10(illuminance), log10(MEDI)),
-    sd_log_difference = sd(log10(illuminance) - log10(MEDI))
+    cor_log = cor(log_illuminance, log_melanopic_edi),
+    sd_log_difference = sd(log_illuminance - log_melanopic_edi)
   )
 
 # Simulate data
-sim_dat <- simulate_from_design(design_df = design_matrix, model = m, sd_scaling = 1)
+sim_dat <- simulate_from_design(design_df = design_matrix, model = m_mel, sd_scaling = 1, seed = seed)
 
-formula_model_col <- log10(simulated_emg) ~ log_illuminance + log_melanopic_edi + (1 | participant_id)
+formula_model_col <- log10(simulated_emg) ~ 
+  log_illuminance + 
+  log_melanopic_edi + 
+  log_rhodopic_edi + 
+  (1 | participant_id)
 
 model_col <- lmer(formula_model_col, data = sim_dat)
 
 summary(model_col)
 performance::check_model(model_col)
 cov2cor(vcov(model_col))
+performance::check_collinearity(model_col)
 ```
 
--> Correlation of 0.816 between the two predictors, which is too high.
+-> Very high collinearity issues. Model struggles
+The issue comes from melanopic and rhodopic curves being so close to each other.
+
+We therefore cannot use such a model.
 
 # Model fit comparisons
 
@@ -821,7 +807,7 @@ fit_one_model <- function(formula, dat, model_name) {
 }
 
 fit_models <- function(dat,
-                       response = c("simulated_log10")) {
+                       response = c("simulated_log10", "simulated_log10_unfloored")) {
   
   response <- match.arg(response)
   
@@ -835,16 +821,24 @@ fit_models <- function(dat,
   mel_formula <- stats::as.formula(
     paste(
       response,
-      "~ log_melanopic_edi + log_baseline + trial +",
-      "(log_melanopic_edi | participant_id)"
+      "~ log_melanopic_edi +",
+      "(1 | participant_id)"
     )
   )
   
   phot_formula <- stats::as.formula(
     paste(
       response,
-      "~ log_illuminance + log_baseline + trial +",
-      "(log_illuminance | participant_id)"
+      "~ log_illuminance +",
+      "(1 | participant_id)"
+    )
+  )
+  
+  rho_formula <- stats::as.formula(
+    paste(
+      response,
+      "~ log_rhodopic_edi +",
+      "(1 | participant_id)"
     )
   )
   
@@ -860,14 +854,22 @@ fit_models <- function(dat,
     model_name = "phot"
   )
   
+  rho_fit <- fit_one_model(
+    formula = rho_formula,
+    dat = dat,
+    model_name = "rho"
+  )
+  
   diagnostics <- dplyr::bind_rows(
     mel_fit$diagnostics,
-    phot_fit$diagnostics
+    phot_fit$diagnostics,
+    rho_fit$diagnostics
   )
   
   list(
     model_mel = mel_fit$model,
     model_phot = phot_fit$model,
+    model_rho = rho_fit$model,
     diagnostics = diagnostics
   )
 }
@@ -876,62 +878,101 @@ compute_delta_aic <- function(model_list, delta_aic_threshold = 2) {
   
   diag <- model_list$diagnostics
   
-  mel_ok <- diag %>%
-    dplyr::filter(model_name == "mel") %>%
-    dplyr::pull(converged)
+  required_models <- c("mel", "phot", "rho")
   
-  phot_ok <- diag %>%
-    dplyr::filter(model_name == "phot") %>%
-    dplyr::pull(converged)
+  model_diag <- diag %>%
+    dplyr::filter(model_name %in% required_models)
   
-  if (!isTRUE(mel_ok) || !isTRUE(phot_ok)) {
+  all_converged <- model_diag %>%
+    dplyr::summarise(
+      ok = all(converged[match(required_models, model_name)])
+    ) %>%
+    dplyr::pull(ok)
+  
+  if (!isTRUE(all_converged)) {
     return(
       tibble::tibble(
         AIC_mel = NA_real_,
         AIC_phot = NA_real_,
-        delta_AIC = NA_real_,
+        AIC_rho = NA_real_,
+        best_model = NA_character_,
+        delta_AIC_mel = NA_real_,
+        delta_AIC_phot = NA_real_,
+        delta_AIC_rho = NA_real_,
+        second_best_delta_AIC = NA_real_,
         evidence = NA_character_
       )
     )
   }
   
-  aic_mel <- diag %>%
-    dplyr::filter(model_name == "mel") %>%
-    dplyr::pull(AIC)
+  aic_summary <- model_diag %>%
+    dplyr::select(model_name, AIC) %>%
+    tidyr::pivot_wider(
+      names_from = model_name,
+      values_from = AIC,
+      names_prefix = "AIC_"
+    ) %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(
+      min_AIC = min(c(AIC_mel, AIC_phot, AIC_rho), na.rm = TRUE),
+      
+      delta_AIC_mel = AIC_mel - min_AIC,
+      delta_AIC_phot = AIC_phot - min_AIC,
+      delta_AIC_rho = AIC_rho - min_AIC,
+      
+      best_model = c("mel", "phot", "rho")[
+        which.min(c(AIC_mel, AIC_phot, AIC_rho))
+      ],
+      
+      second_best_delta_AIC = sort(c(
+        delta_AIC_mel,
+        delta_AIC_phot,
+        delta_AIC_rho
+      ))[2],
+      
+      evidence = dplyr::case_when(
+        second_best_delta_AIC > delta_aic_threshold ~
+          paste0("Favours ", best_model, " model"),
+        TRUE ~
+          "No clear preference"
+      )
+    ) %>%
+    dplyr::ungroup() %>%
+    dplyr::select(
+      AIC_mel,
+      AIC_phot,
+      AIC_rho,
+      best_model,
+      delta_AIC_mel,
+      delta_AIC_phot,
+      delta_AIC_rho,
+      second_best_delta_AIC,
+      evidence
+    )
   
-  aic_phot <- diag %>%
-    dplyr::filter(model_name == "phot") %>%
-    dplyr::pull(AIC)
-  
-  delta_aic <- aic_mel - aic_phot
-  
-  evidence <- dplyr::case_when(
-    delta_aic < -delta_aic_threshold ~ "favours melanopic EDI model",
-    delta_aic >  delta_aic_threshold ~ "favours photopic lux model",
-    TRUE                             ~ "no clear preference"
-  )
-  
-  tibble::tibble(
-    AIC_mel = aic_mel,
-    AIC_phot = aic_phot,
-    delta_AIC = delta_aic,
-    evidence = evidence
-  )
+  aic_summary
 }
 ```
 
-# BFDA loop
+Small note:
+We dropped random slopes here because they were causing convergence issues.
+
+# Run loop
 
 ```{r warning=F}
+n_simulations <- 1000
+
 future::plan(
   future::multisession,
-  workers = parallel::detectCores() - 1
+  workers = max(1, parallel::detectCores() - 1)
 )
 
 run_aic_sim <- function(
     n_sims = 1000,
     n_subjects = 20,
     noise_scaling = 1,
+    driver,
+    gen_model,
     delta_aic_threshold = 2
 ) {
   
@@ -963,9 +1004,13 @@ run_aic_sim <- function(
     ~ {
       sim_data <- simulate_from_design(
         design_df = design_subset,
-        model = m,
-        sd_scaling = noise_scaling
+        model = gen_model,
+        sd_scaling = noise_scaling,
+        seed = NULL
       )
+      
+      sim_data <- sim_data %>% 
+        dplyr::filter(floored == FALSE)
       
       fits <- fit_models(
         dat = sim_data,
@@ -984,12 +1029,14 @@ run_aic_sim <- function(
         sd_response = stats::sd(sim_data[[response]], na.rm = TRUE),
         sd_log_melanopic_edi = stats::sd(sim_data$log_melanopic_edi, na.rm = TRUE),
         sd_log_illuminance = stats::sd(sim_data$log_illuminance, na.rm = TRUE),
+        sd_log_rhodopic_edi = stats::sd(sim_data$log_rhodopic_edi, na.rm = TRUE),
         prop_floored = mean(sim_data$floored, na.rm = TRUE)
       )
       
       diagnostics <- fits$diagnostics %>%
         dplyr::mutate(
           sim_id = .x,
+          driver = driver,
           n_subjects = n_subjects,
           noise_scaling = noise_scaling,
           response = response
@@ -1002,6 +1049,7 @@ run_aic_sim <- function(
         aic_result = aic_result %>%
           dplyr::mutate(
             sim_id = .x,
+            driver = driver,
             n_subjects = n_subjects,
             noise_scaling = noise_scaling,
             response = response
@@ -1015,39 +1063,43 @@ run_aic_sim <- function(
   aic_results <- purrr::map_dfr(sim_results, "aic_result")
   diagnostics <- purrr::map_dfr(sim_results, "diagnostics")
   
-  delta_aic_list <- aic_results$delta_AIC
-  
-  n_valid <- sum(!is.na(delta_aic_list))
-  n_failed <- sum(is.na(delta_aic_list))
+  evidence_list <- aic_results$evidence
+
+  n_valid <- sum(!is.na(evidence_list))
+  n_failed <- sum(is.na(evidence_list))
   
   if (n_valid == 0) {
     summary <- tibble::tibble(
       p_favour_mel = NA_real_,
-      p_unclear = NA_real_,
       p_favour_phot = NA_real_,
+      p_favour_rho = NA_real_,
+      p_unclear = NA_real_,
       n_sims = n_sims,
       n_valid = n_valid,
       n_failed = n_failed,
       prop_failed = n_failed / n_sims,
+      driver = driver,
       n_subjects = n_subjects,
       noise_scaling = noise_scaling,
       response = response
     )
   } else {
     summary <- tibble::tibble(
-      p_favour_mel = mean(delta_aic_list < -delta_aic_threshold, na.rm = TRUE),
-      p_unclear = mean(abs(delta_aic_list) <= delta_aic_threshold, na.rm = TRUE),
-      p_favour_phot = mean(delta_aic_list > delta_aic_threshold, na.rm = TRUE),
+      p_favour_mel = mean(evidence_list == "Favours mel model", na.rm = TRUE),
+      p_favour_phot = mean(evidence_list == "Favours phot model", na.rm = TRUE),
+      p_favour_rho = mean(evidence_list == "Favours rho model", na.rm = TRUE),
+      p_unclear = mean(evidence_list == "No clear preference", na.rm = TRUE),
       n_sims = n_sims,
       n_valid = n_valid,
       n_failed = n_failed,
       prop_failed = n_failed / n_sims,
+      driver = driver,
       n_subjects = n_subjects,
       noise_scaling = noise_scaling,
       response = response
     )
   }
-  
+    
   list(
     summary = summary,
     aic_results = aic_results,
@@ -1055,483 +1107,322 @@ run_aic_sim <- function(
   )
 }
 
-# grid <- tidyr::crossing(
-#   n_subjects = as.integer(seq(2, 50)), # 2 to 50 participants
-#   noise_scaling = as.integer(seq(1, 10)) # 10 values, range is from original residual variance to residual variance increased 10 fold
-# )
-
-grid <- tidyr::crossing(
-  n_subjects = c(2, 5, 10, 15, 20, 30, 40, 50),
-  noise_scaling = c(0.1, 0.5, 1, 2, 5)
+grid <- tidyr::expand_grid(
+  driver_models,
+  n_subjects = as.integer(seq(2, 50)), # 2 to 50 participants
+  noise_scaling = c(0.5, 1, 2, 4, 6, 8, 10)
 )
 
 aic_nested <- grid %>%
   dplyr::mutate(
     results = purrr::pmap(
-      list(n_subjects, noise_scaling),
+      list(driver, model, n_subjects, noise_scaling),
       ~ {
         cat(
-          "Running: subjects =", ..1,
-          " noise =", ..2,
+          "Running: driver =", ..1,
+          " subjects =", ..3,
+          " noise =", ..4,
           "\n"
         )
         
         run_aic_sim(
-          n_sims = 20,
-          n_subjects = ..1,
-          noise_scaling = ..2
+          n_sims = n_simulations,
+          driver = ..1,
+          gen_model = ..2,
+          n_subjects = ..3,
+          noise_scaling = ..4
         )
       }
     )
   )
 
-aic_df <- aic_nested %>%
-  dplyr::mutate(
-    summary = purrr::map(
-      results,
-      ~ .x$summary %>%
-        dplyr::select(
-          -dplyr::any_of(c("n_subjects", "noise_scaling"))
-        )
-    )
-  ) %>%
-  dplyr::select(-results) %>%
-  tidyr::unnest(summary)
-
 aic_diagnostics <- aic_nested %>%
-  dplyr::mutate(
+  dplyr::transmute(
+    driver,
+    n_subjects,
+    noise_scaling,
     diagnostics = purrr::map(
       results,
       ~ .x$diagnostics %>%
         dplyr::select(
-          -dplyr::any_of(c("n_subjects", "noise_scaling"))
+          -dplyr::any_of(c("driver", "n_subjects", "noise_scaling"))
         )
     )
   ) %>%
-  dplyr::select(-results) %>%
   tidyr::unnest(diagnostics)
 
-# aic_diagnostics %>%
-#   dplyr::group_by(noise_scaling, model_name) %>%
-#   dplyr::summarise(
-#     n_fits = dplyr::n(),
-#     n_failed = sum(!converged),
-#     prop_failed = mean(!converged),
-#     convergence_codes = paste(unique(convergence_code), collapse = ", "),
-#     pdHess_values = paste(unique(pdHess), collapse = ", "),
-#     warnings = paste(unique(warnings[warnings != ""]), collapse = " | "),
-#     errors = paste(unique(error[!is.na(error)]), collapse = " | "),
-#     .groups = "drop"
-#   ) %>%
-#   dplyr::arrange(noise_scaling, model_name)
-
-# aic_diagnostics %>%
-#   dplyr::group_by(noise_scaling, n_subjects, response, model_name) %>%
-#   dplyr::summarise(
-#     n_fits = dplyr::n(),
-#     n_failed = sum(!converged),
-#     prop_failed = mean(!converged),
-#     pdHess_values = paste(unique(pdHess), collapse = ", "),
-#     warnings = paste(unique(warnings[warnings != ""]), collapse = " | "),
-#     fit_messages = paste(unique(fit_message[!is.na(fit_message)]), collapse = " | "),
-#     errors = paste(unique(error[!is.na(error)]), collapse = " | "),
-#     mean_prop_floored = mean(prop_floored, na.rm = TRUE),
-#     .groups = "drop"
-#   )
-
-aic_diagnostics %>%
-  dplyr::group_by(n_subjects, noise_scaling, model_name) %>%
-  dplyr::summarise(
-    n_fits = dplyr::n(),
-    n_failed = sum(!converged),
-    prop_failed = mean(!converged),
-    warnings = paste(unique(warnings[warnings != ""]), collapse = " | "),
-    fit_messages = paste(unique(fit_message[!is.na(fit_message)]), collapse = " | "),
-    errors = paste(unique(error[!is.na(error)]), collapse = " | "),
-    .groups = "drop"
-  )
-
 aic_per_sim <- aic_nested %>%
-  dplyr::mutate(
-    aic_results = purrr::map(results, "aic_results")
+  dplyr::transmute(
+    driver,
+    n_subjects,
+    noise_scaling,
+    aic_results = purrr::map(
+      results,
+      ~ .x$aic_results %>%
+        dplyr::select(
+          -dplyr::any_of(c("driver", "n_subjects", "noise_scaling"))
+        )
+    )
   ) %>%
-  dplyr::select(aic_results) %>%
   tidyr::unnest(aic_results)
+
+evidence_levels <- c(
+  "Favours mel model",
+  "Favours phot model",
+  "Favours rho model",
+  "No clear preference"
+)
+
+evidence_props <- aic_per_sim %>%
+  dplyr::filter(!is.na(evidence)) %>%
+  dplyr::mutate(
+    evidence = factor(evidence, levels = evidence_levels)
+  ) %>%
+  dplyr::count(
+    driver,
+    noise_scaling,
+    n_subjects,
+    evidence,
+    name = "n",
+    .drop = FALSE
+  ) %>%
+  dplyr::group_by(driver, noise_scaling, n_subjects) %>%
+  tidyr::complete(
+    evidence = factor(evidence_levels, levels = evidence_levels),
+    fill = list(n = 0)
+  ) %>%
+  dplyr::mutate(
+    prop = n / sum(n)
+  ) %>%
+  dplyr::ungroup()
+
+evidence_props
 ```
 
 ```{r}
 readr::write_csv(
-  aic_df,
-  here::here("outputs", "aic_sim_results.csv")
-)
-
-readr::write_csv(
   aic_diagnostics,
-  here::here("outputs", "aic_sim_diagnostics.csv")
+  here::here("outputs", "power_analysis", "power_analysis_diagnostics.csv")
 )
 
 readr::write_csv(
   aic_per_sim,
-  here::here("outputs", "aic_sim_per_simulation_results.csv")
+  here::here("outputs", "power_analysis", "power_analysis_full_results.csv")
+)
+
+readr::write_csv(
+  evidence_props,
+  here::here("outputs", "power_analysis", "power_analysis_evidence_props.csv")
 )
 ```
-
 
 # Plotting results
 
 ```{r}
-# aic_df <- read_csv(here("outputs", "aic_sim_results.csv"))
+aic_diagnostics <- read.csv(here::here("outputs", "power_analysis", "power_analysis_diagnostics.csv"))
+evidence_props <- read.csv(here::here("outputs", "power_analysis", "power_analysis_evidence_props.csv"))
+```
 
-power_threshold <- 0.8
 
-# Use probability of selecting the melanopic model as the main "power" outcome
-plot_df <- aic_df %>%
-  dplyr::mutate(
-    power = p_favour_mel
-  )
+```{r}
+chosen_n <- 20
+chosen_n_position <- which(sort(unique(evidence_props$n_subjects)) == chosen_n)
 
-# Colour palettes 
-n_levels_noise <- length(levels(factor(plot_df$noise_scaling))) 
-n_levels_subjects <- length(levels(factor(plot_df$n_subjects))) 
-plot1_pal <- colorRampPalette(c("#E69F00", "#2C3E50")) 
-plot2_pal <- colorRampPalette(c("#2C3E50", "#E69F00")) 
-plot3_pal <- colorRampPalette(c("#F2C14E", "#8E1B1B"))
+evidence_colours <- c(
+  "Favours mel model" = "#009E73",      # bluish green
+  "Favours phot model" = "#D55E00",     # vermillion
+  "Favours rho model" = "#0072B2",      # blue
+  "No clear preference" = "grey60"
+)
 
-# 1. Power vs number of participants
-## This shows how power increases with participants, with separate curves for noise levels.
-plot1 <- ggplot(
-  plot_df,
-  aes(x = n_subjects, y = power, group = factor(noise_scaling), colour = factor(noise_scaling))
-) + 
-  geom_line() +
-  geom_point() + 
-  
-  # ---- Annotation text ----
-  annotate("text",
-           x = 35,
-           y = 0.115,
-           label = "Selected sample size",
-           colour = "black",
-           vjust = 0,
-           size = 3, 
-           fontface = "bold") +
-  
-  # ---- Left-facing arrow below text ----
-  annotate("segment",
-           x = 27, xend = 22,       # ← makes arrow point left
-           y = 0.125, yend = 0.125,   # position slightly below text
-           colour = "black",
-           arrow = arrow(type = "closed", length = unit(0.15, "cm"))) +
-  
-  annotate("text",
-           x = 40,
-           y = power_threshold + 0.02,
-           label = "Power threshold",
-           colour = "red",
-           vjust = 0, 
-           size = 3, 
-           fontface = "bold") +
-  
-  geom_hline(yintercept = power_threshold, color = "red", linetype = "dashed") + 
-  geom_vline(xintercept = 20, colour = "black", linetype = "dashed", linewidth = 1) +
-  scale_colour_manual(values = plot1_pal(n_levels_noise)) +
-  xlim(2, 50) +
-  ylim(0, 1) + 
-  labs(x = "Sample size", 
-       y = "Power: P(ΔAIC < -2)",
-       colour = "Noise scaling factor", 
-       title = "**A** Dependence of AIC-based power on sample size") + 
-  theme_minimal() + 
-  theme(
-    plot.title = ggtext::element_markdown(),
-    legend.key.height = unit(3, "mm"),     # vertical size of each key
-    legend.key.width  = unit(4, "mm"),     # optional, horizontal
-    legend.spacing.y  = unit(1, "mm")      # space between legend rows
-  ) +   
-  plot_formatting
+model_colours <- c(
+  "mel" = "#009E73",   # bluish green
+  "phot" = "#D55E00",  # vermillion
+  "rho" = "#0072B2"    # blue
+)
 
-plot20 <- plot_df %>% dplyr::filter(n_subjects == 20)
-
-# 2. Power vs noise scaling
-## Because noise scaling is on a log10 scale, we apply scale_x_log10().
-plot2 <- ggplot(plot_df, aes(x = noise_scaling, y = power, group = n_subjects, colour = n_subjects)) + 
-  geom_line() + 
-  geom_point() + 
-
-  # --- threshold line (existing) ---
-  geom_hline(yintercept = power_threshold, color = "red", linetype = "dashed") +
-
-  # --- label above horizontal threshold ---
-  annotate("text",
-           x = 8,
-           y = power_threshold + 0.02,
-           label = "Power threshold",
-           colour = "red",
-           vjust = 0,
-           size = 3, 
-           fontface = "bold") +
-
-  # --- selected sample size line ---
-  geom_line(data = plot20,
-            aes(x = noise_scaling, y = power),
-            colour = "black",
-            linetype = "dashed",
-            linewidth = 1,
-            inherit.aes = FALSE) +
-  
-  annotation_custom(
-    grob = grid::textGrob(
-      label = "– –  Selected sample size",
-      x = 0.95, y = 0.98,              # right-aligned, above plot
-      hjust = 1, vjust = 0,
-      gp = grid::gpar(col = "black", fontsize = 8, fontface = "bold")
-    )
-  ) +
-
-  scale_colour_gradientn(colors = plot2_pal(n_levels_subjects)) +
-  scale_x_continuous() +
-  coord_cartesian(clip = "off") +
-  ylim(0, 1) +
-  labs(x = "Noise scaling factor",
-       y = "Power: P(ΔAIC < -2)",
-       colour = "Sample size",
-       title = "**B** Dependence of AIC-based power on noise scaling") +
-  theme_minimal() +
-  theme(
-    plot.title = ggtext::element_markdown()
-    ) +     
-  plot_formatting
-
-# 3. Power heatmap (matrix)
-## Power-analysis view: participants × noise scaling. This gives a nice heatmap of the whole design grid.
-
-plot_df <- plot_df %>%
-  dplyr::mutate(
-    y_index = match(n_subjects, sort(unique(n_subjects))),
-    x_index = match(noise_scaling, sort(unique(noise_scaling)))
-  )
-
-plot3 <- ggplot(plot_df, aes(x = x_index, y = y_index, fill = power)) + 
-  geom_tile() +
-  geom_hline(
-    yintercept = match(20, sort(unique(plot_df$n_subjects))),
-    colour = "black", linetype = "dashed", linewidth = 1
-  ) +
-  geom_text(
-  aes(
-    label = sprintf("%.2f", power),
-    fontface = ifelse(power >= power_threshold, "bold", "plain")
+clean_facet_labels <- ggplot2::labeller(
+  driver = c(
+    mel = "Driver: melanopic EDI",
+    phot = "Driver: illuminance",
+    rho = "Driver: rhodopic EDI"
   ),
-  colour = "white",
-  size = 3
-) +
-  scale_fill_gradientn(colours = plot3_pal(100), guide = "none") +
-  scale_x_continuous(
-    breaks = unique(plot_df$x_index),
-    labels = sort(unique(plot_df$noise_scaling))
-  ) +
-  scale_y_continuous(
-    breaks = unique(plot_df$y_index),
-    labels = sort(unique(plot_df$n_subjects))
-  ) +
-  labs(
-    x = "Noise scaling factor", 
-    y = "Sample size",
-    title = "AIC-based power heatmap"
-  ) +
-  annotation_custom(
-    grob = grid::textGrob(
-      label = "– –  Selected sample size",
-      x = 0.95, y = 0.98,              # right-aligned, above plot
-      hjust = 1, vjust = 0,
-      gp = grid::gpar(col = "black", fontsize = 8, fontface = "bold")
+  noise_scaling = function(x) paste0("Noise scaling: ", x)
+)
+
+plot_power <- evidence_props %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = n_subjects,
+      y = prop,
+      colour = evidence,
+      group = evidence
     )
   ) +
-  coord_cartesian(clip = "off") +
-  theme_minimal() +
-  theme(
-    panel.grid = element_blank(),
-    axis.ticks = element_blank()
+  ggplot2::geom_vline(
+    ggplot2::aes(
+      xintercept = chosen_n,
+      linetype = "Chosen sample size"
+    ),
+    colour = "grey30",
+    linewidth = 0.7
   ) +
-  plot_formatting
-
-joined <- plot1 / plot2
-# + plot_annotation(title = "Power analysis (BFDA)")
-
-joined
-plot1
-plot2
-plot3
-
-# Saving plots
-save_rds_safe(plot1, here("outputs", "figures", "rds", glue("aic_power_plot_a_sample_size.rds")))
-save_rds_safe(plot2, here("outputs", "figures", "rds", glue("aic_power_plot_b_noise_scaling.rds")))
-
-formatted_save(here("outputs", "figures", "aic_power_plot_ab_combined.jpg"), joined, width = 7, height = 6)
-save_rds_safe(joined, here("outputs", "figures", "rds", glue("aic_power_plot_ab_combined.rds")))
-
-save_rds_safe(plot3, here("outputs", "figures", "rds", glue("aic_power_plot_c_heatmap.rds")))
-```
-
-# Contour plot
-
-```{r}
-plot3_lines <- ggplot(plot_df, aes(noise_scaling, n_subjects, z = power)) +
-  geom_contour(bins = 10, linewidth = 0.4, colour = "grey30") +
-  geom_contour(breaks = power_threshold, colour = "red", linewidth = 1) +
-  geom_hline(yintercept = 20, colour = "black", linetype = "dashed", linewidth = 1) +
-  scale_x_continuous(breaks = seq(1, 10)) +
-  labs(x = "Noise scaling factor", y = "Sample size", title = "AIC-based power contours") +
-  coord_cartesian(clip = "off") +
-  theme_minimal() +
-  theme(panel.grid = element_blank(), axis.ticks = element_blank()) +
-  plot_formatting
-
-plot3_lines
-
-# -------
-
-contour_breaks <- c(seq(0, 1, by = 0.1), 1.000001)
-
-nice_interval_labels <- function(x) {
-  # Round anything like 0.700000 -> 0.7 (to 1 decimal place)
-  x <- gsub("(\\d+\\.\\d{1})\\d+", "\\1", x)
-
-  # Rename the top bin (after rounding it becomes "(1, 1.0]")
-  x <- gsub("^\\(1(\\.0)?,\\s*1(\\.0)?\\]$", "1.0", x)
-
-  x
-}
-
-
-plot3_contour <- ggplot(
-  plot_df,
-  aes(
-    x = noise_scaling,
-    y = n_subjects,
-    z = power
-  )
-) +
-  geom_contour_filled(
-    breaks = contour_breaks,
-    alpha = 0.95
+  ggplot2::scale_linetype_manual(
+    name = NULL,
+    values = c("Chosen sample size" = "dashed")
   ) +
-  
-  geom_contour(
-    breaks = power_threshold,
-    colour = "red",
-    linewidth = 1
+  ggplot2::geom_point(size = 2) +
+  ggplot2::geom_line(linewidth = 0.8) +
+  ggplot2::facet_grid(
+    driver ~ noise_scaling,
+    labeller = clean_facet_labels
   ) +
-  
-  # geom_raster(aes(fill = power), interpolate = TRUE) +
-
-  # --- selected sample size line (n = 20) ---
-  geom_hline(
-    yintercept = 20,
-    colour = "black",
-    linetype = "dashed",
-    linewidth = 1
-  ) +
-
-  scale_fill_manual(
-    values = plot3_pal(11),
-    name = "Power: P(ΔAIC < -2)",
-    labels = nice_interval_labels
-  ) +
-  
-  scale_x_continuous(breaks = seq(1, 10)) +
-
-  labs(
-    x = "Noise scaling factor",
-    y = "Sample size",
-    title = "AIC-based power surface"
-  ) +
-
-  annotation_custom(
-    grob = grid::textGrob(
-      label = "– –  Selected sample size",
-      x = 0.95, y = 0.98,
-      hjust = 1, vjust = 0,
-      gp = grid::gpar(col = "black", fontsize = 8, fontface = "bold")
-    )
-  ) +
-
-  coord_cartesian(clip = "off") +
-  theme_minimal() +
-  theme(
-    panel.grid = element_blank(),
-    axis.ticks = element_blank()
-  ) +
-  plot_formatting
-
-plot3_contour
-
-formatted_save(here("outputs", "figures", "aic_power_plot_c_contour.jpg"), plot3_contour)
-save_rds_safe(plot3_contour, here("outputs", "figures", "rds", glue("aic_power_plot_c_contour.rds")))
-```
-
-Extra plot…
-
-```{r}
-iso_breaks <- seq(0, 1, by = 0.1)
-
-plot3_iso_grad <- ggplot(
-  plot_df,
-  aes(x = noise_scaling, y = n_subjects, z = power)
-) +
-  geom_contour(
-    aes(colour = after_stat(level)),
-    breaks = iso_breaks,
-    linewidth = 0.8
-  ) +
-  
-  geom_hline(
-    yintercept = 20,
-    colour = "black",
-    linetype = "dashed",
-    linewidth = 1
-  ) +
-  
-  scale_colour_gradientn(
-    colours = plot3_pal(100),
-    name = "Power: P(ΔAIC < -2)",
+  ggplot2::scale_y_continuous(
     limits = c(0, 1),
-    breaks = iso_breaks,
-    labels = function(x) sprintf("%.1f", x)
+    breaks = seq(0, 1, by = 0.25)
   ) +
-  
-  scale_x_continuous(breaks = seq(1, 10)) +
-  
-  labs(
-    x = "Noise scaling factor",
-    y = "Sample size",
-    title = "AIC-based power contour plot"
+  ggplot2::scale_colour_manual(
+    values = evidence_colours,
+    drop = FALSE
   ) +
-  
-  annotation_custom(
-    grob = grid::textGrob(
-      label = "– –  Selected sample size",
-      x = 0.95,
-      y = 0.98,
-      hjust = 1,
-      vjust = 0,
-      gp = grid::gpar(
-        col = "black",
-        fontsize = 8,
-        fontface = "bold"
-      )
-    )
+  ggplot2::labs(
+    x = "Number of participants",
+    y = "Proportion of simulations",
+    colour = "Evidence",
+    title = "Evidence outcome proportions by assumed generative driver"
   ) +
-  
-  coord_cartesian(clip = "off") +
-  theme_minimal() +
+  ggplot2::theme_minimal() +
   plot_formatting
 
-plot3_iso_grad
+plot_power_2 <- evidence_props %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = factor(n_subjects),
+      y = prop,
+      fill = evidence
+    )
+  ) +
+  ggplot2::geom_vline(
+    ggplot2::aes(
+      xintercept = chosen_n_position,
+      linetype = "Chosen sample size"
+    ),
+    colour = "grey30",
+    linewidth = 0.7
+  ) +
+  ggplot2::scale_linetype_manual(
+    name = NULL,
+    values = c("Chosen sample size" = "dashed")
+  ) +
+  ggplot2::geom_col(width = 0.8) +
+  ggplot2::facet_grid(
+    driver ~ noise_scaling,
+    labeller = clean_facet_labels
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+  ggplot2::scale_fill_manual(
+    values = evidence_colours,
+    drop = FALSE
+  ) +
+  ggplot2::labs(
+    x = "Number of participants",
+    y = "Proportion of simulations",
+    fill = "Evidence",
+    title = "Evidence outcome proportions by assumed generative driver"
+  ) +
+  ggplot2::theme_minimal() +
+  plot_formatting
+
+plot_convergence <- aic_diagnostics %>%
+  dplyr::group_by(driver, n_subjects, noise_scaling, model_name) %>%
+  dplyr::summarise(
+    prop_converged = mean(converged),
+    .groups = "drop"
+  ) %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = n_subjects,
+      y = prop_converged,
+      colour = model_name,
+      group = model_name
+    )
+  ) +
+  ggplot2::geom_vline(
+    ggplot2::aes(
+      xintercept = chosen_n,
+      linetype = "Chosen sample size"
+    ),
+    colour = "grey30",
+    linewidth = 0.7
+  ) +
+  ggplot2::geom_point(size = 2, alpha = 0.3) +
+  ggplot2::geom_line(linewidth = 0.8) +
+  ggplot2::facet_grid(
+    driver ~ noise_scaling,
+    labeller = clean_facet_labels
+  ) +
+  ggplot2::scale_colour_manual(
+    values = model_colours,
+    drop = FALSE
+  ) +
+  ggplot2::scale_linetype_manual(
+    name = NULL,
+    values = c("Chosen sample size" = "dashed")
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, 1),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+  ggplot2::labs(
+    x = "Number of participants",
+    y = "Proportion of converged fits",
+    colour = "Fitted model",
+    title = "Convergence rate by driver, sample size, and noise level"
+  ) +
+  ggplot2::theme_minimal() +
+  plot_formatting
+
+plot_power
+plot_power_2
+plot_convergence
 
 save_rds_safe(
-  plot3_iso_grad,
-  here::here("outputs", "figures", "rds", glue::glue("aic_power_plot_c_contour_bis.rds"))
+  plot_power,
+  here::here("outputs", "figures", "rds", glue::glue("power_analysis_evidence.rds"))
+)
+
+formatted_save(
+  here::here("outputs", "figures", "power_analysis_evidence.jpg"), 
+  plot_power, 
+  width = 9, 
+  height = 7
+)
+
+save_rds_safe(
+  plot_power_2,
+  here::here("outputs", "figures", "rds", glue::glue("power_analysis_evidence_bar.rds"))
+)
+
+formatted_save(
+  here::here("outputs", "figures", "power_analysis_evidence_bar.jpg"), 
+  plot_power_2, 
+  width = 9, 
+  height = 7
+)
+
+save_rds_safe(
+  plot_convergence,
+  here::here("outputs", "figures", "rds", glue::glue("power_analysis_convergence.rds"))
+)
+
+formatted_save(
+  here::here("outputs", "figures", "power_analysis_convergence.jpg"), 
+  plot_convergence, 
+  width = 9, 
+  height = 7
 )
 ```
 

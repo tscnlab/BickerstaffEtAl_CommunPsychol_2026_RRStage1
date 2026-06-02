@@ -6,6 +6,7 @@ output:
   html_document:
     toc: true
     toc_float: true
+    code_folding: hide
 ---
 
 ```{r render-time-1, include=FALSE}
@@ -13,7 +14,16 @@ output:
 .render_start <- Sys.time()
 ```
 
-```{r setup, warning=FALSE, message=FALSE}
+```{r, include=FALSE}
+knitr::opts_chunk$set(
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+# Setup
+
+```{r setup}
 # Seed for reproducibility
 set.seed(2025)
 
@@ -35,7 +45,7 @@ source(here("R", "helpers.R"))
 source(here("R", "plot_settings.R"))
 ```
 
-# EMG data
+# Read EMG data
 
 ```{r}
 # ------------------------------------------------------------------------------
@@ -133,6 +143,8 @@ model_data <- data %>%
 
     log_emg_raw       = log10(emg_raw),
     log_melanopic_edi = log10(pmax(melanopic_edi, 1)),
+    log_illuminance   = log10(pmax(illuminance, 1)),
+    log_rhodopic_edi  = log10(pmax(rhodopic_edi, 1)),
     log_baseline      = log10(baseline_value)
   )
 
@@ -187,9 +199,9 @@ Plot_scaled_log10 <-
   (Plot_unscaled_log10 + Plot_scaled_log10)
 ```
 
-## Model
+# Model
 
-### Helpers
+## Helpers
 
 ```{r}
 fit_glmmTMB <- function(formula, data) {
@@ -206,7 +218,7 @@ fit_glmmTMB <- function(formula, data) {
   model
 }
 
-check_glmmTMB <- function(model) {
+check_glmmTMB <- function(model, save_path = NULL) {
   print(summary(model))
 
   cat("\nConvergence check:\n")
@@ -215,14 +227,27 @@ check_glmmTMB <- function(model) {
   cat("\nSingularity check:\n")
   print(performance::check_singularity(model))
 
-  print(performance::check_model(model))
+  diagnostic_plot <- performance::check_model(model)
+  # print(diagnostic_plot)
+  
+  print(performance::r2(model))
+  print(performance::icc(model))
+  print(performance::check_collinearity(model))
+  
+  if (!is.null(save_path)) {
+    ggsave_safe(
+      save_path, 
+      plot(diagnostic_plot),
+      width = 9,
+      height = 9,
+      dpi = 300)
+  }
 
   invisible(model)
 }
 ```
 
-
-### Random effects for melanopic EDI?
+## Random effects for melanopic EDI?
 
 ```{r}
 #| fig-width: 8
@@ -272,7 +297,7 @@ AIC(m0, m1, m2)
 `m1` is the preferred model (lower AIC).
 Keeping random slopes is warranted here.
 
-### Include baseline?
+## Include baseline?
 
 ```{r}
 #| fig-width: 8
@@ -296,7 +321,7 @@ AIC(m1, m3)
 `m3` is the preferred model.
 Including baseline is warranted here.
 
-### Include trial number?
+## Include trial number?
 
 ```{r}
 #| fig-width: 8
@@ -311,7 +336,7 @@ form_m4 <- log_emg_raw ~
 
 m4 <- fit_glmmTMB(form_m4, model_data)
 
-check_glmmTMB(m4)
+check_glmmTMB(m4, save_path = here::here("outputs", "models", "emg_lmm_mel_diag.png"))
 ```
 
 ```{r}
@@ -326,7 +351,34 @@ Including trial number is warranted.
 #| fig-height: 6
 
 visreg(m4, xvar = "log_melanopic_edi", jitter = TRUE)
+visreg(m4, xvar = "lights_on", jitter = TRUE)
 ```
+
+# Why not a model with all predictors?
+
+```{r}
+#| fig-width: 8
+#| fig-height: 12
+
+form_m5 <- log_emg_raw ~
+  log_melanopic_edi +
+  log_illuminance +
+  log_rhodopic_edi +
+  lights_on +
+  log_baseline +
+  trial +
+  (log_melanopic_edi | participant_id) +
+  (log_illuminance | participant_id) +
+  (log_rhodopic_edi | participant_id)
+
+m5 <- fit_glmmTMB(form_m5, model_data)
+
+check_glmmTMB(m5)
+```
+
+A model with all predictors suffers from collinearity issues, because the
+melanopic and rhodopic curves are very close to each other and the model
+cannot decide between the two…
 
 # Predictions against actual data
 
@@ -533,25 +585,210 @@ plot_pred_raw
 plot_pred_log_y
 ```
 
-# Saving final model
+Note:
+Here we see that the predictions become non-physiological below ~200 mel EDI.
+We will have to take care of this issue during the power analysis, more is
+detailed on this in the relevant file: `power_analysis.Rmd`
+
+# Create photopic and rhodopic models, too
+
+This allows to assume that cones/rods are driving the responses, instead of just
+assuming that ipRGCs are the only driver…
 
 ```{r}
-final_model <- m4
-save_rds_safe(final_model, here("outputs", "emg_lmm.rds"))
+#| fig-width: 8
+#| fig-height: 12
+
+form_m4_phot <- log_emg_raw ~
+  log_illuminance +
+  lights_on +
+  log_baseline +
+  trial +
+  (log_illuminance | participant_id)
+
+m4_phot <- fit_glmmTMB(form_m4_phot, model_data)
+
+check_glmmTMB(m4_phot, save_path = here::here("outputs", "models", "emg_lmm_phot_diag.png"))
+```
+
+```{r}
+#| fig-width: 8
+#| fig-height: 12
+
+form_m4_rho <- log_emg_raw ~
+  log_rhodopic_edi +
+  lights_on +
+  log_baseline +
+  trial +
+  (log_illuminance | participant_id)
+
+m4_rho <- fit_glmmTMB(form_m4_rho, model_data)
+
+check_glmmTMB(m4_rho, save_path = here::here("outputs", "models", "emg_lmm_rho_diag.png"))
+```
+
+```{r}
+AIC(m4, m4_phot, m4_rho)
+```
+
+As expected, the three models are pretty much equivalent, because we keep the
+spectrum constant, the ratios between the metrics remain constant too
+
+# Saving final models
+
+```{r}
+# Final models -------------------------------------------------------------
+
+final_model_mel <- m4
+final_model_phot <- m4_phot
+final_model_rho <- m4_rho
+
+final_models <- list(
+  mel = final_model_mel,
+  phot = final_model_phot,
+  rho = final_model_rho
+)
+
+model_labels <- c(
+  mel = "Melanopic EDI",
+  phot = "Photopic illuminance",
+  rho = "Rhodopic EDI"
+)
+
+light_metric_labels <- c(
+  mel = "Melanopic EDI, log10",
+  phot = "Photopic illuminance, log10",
+  rho = "Rhodopic EDI, log10"
+)
+
+# Save final model objects -------------------------------------------------
+
+purrr::iwalk(
+  final_models,
+  ~ save_rds_safe(
+    .x,
+    here::here(
+      "outputs",
+      "models",
+      glue::glue("emg_lmm_{.y}.rds")
+    )
+  )
+)
 ```
 
 # Manuscript-ready outputs
 
 ```{r}
-regression_table <- final_model %>%
-  tbl_regression(exponentiate = TRUE)
+# Coefficient table --------------------------------------------------------
 
-regression_table
+coef_table <- purrr::imap_dfr(
+  final_models,
+  ~ broom.mixed::tidy(
+    .x,
+    effects = "fixed",
+    conf.int = TRUE
+  ) %>%
+    dplyr::mutate(
+      model = .y,
+      model_label = model_labels[[.y]],
+      estimate_exp = exp(estimate),
+      conf.low_exp = exp(conf.low),
+      conf.high_exp = exp(conf.high)
+    )
+)
+
+readr::write_csv(
+  coef_table,
+  here::here("outputs", "models", "emg_lmm_all_coefs.csv")
+)
+
+coef_table
 ```
 
 ```{r}
-performance::r2(final_model)
-performance::icc(final_model)
+# Model summaries ---------------------------------------------------------
+
+model_summaries <- purrr::imap_dfr(
+  final_models,
+  ~ {
+    r2 <- MuMIn::r.squaredGLMM(.x)
+
+    tibble::tibble(
+      model = .y,
+      model_label = model_labels[[.y]],
+      r2_marginal = r2[1, "R2m"],
+      r2_conditional = r2[1, "R2c"],
+      AIC = AIC(.x),
+      BIC = BIC(.x),
+      logLik = as.numeric(logLik(.x))
+    )
+  }
+)
+
+readr::write_csv(
+  model_summaries,
+  here::here("outputs", "models", "emg_lmm_model_summaries.csv")
+)
+
+model_summaries
+```
+
+```{r, results='asis'}
+# Save manuscript-style HTML model tables ---------------------------------
+
+dir.create(
+  here::here("outputs", "models"),
+  recursive = TRUE,
+  showWarnings = FALSE
+)
+
+sjPlot::tab_model(
+  final_model_mel,
+  show.icc = TRUE,
+  show.r2 = TRUE,
+  show.re.var = TRUE,
+  pred.labels = c(
+    "Intercept",
+    "Melanopic EDI, log10",
+    "Lights on",
+    "Baseline EMG, log10",
+    "Trial number"
+  ),
+  dv.labels = "OO-EMG response, log10",
+  file = here::here("outputs", "models", "emg_lmm_mel_model_table.html")
+)
+
+sjPlot::tab_model(
+  final_model_phot,
+  show.icc = TRUE,
+  show.r2 = TRUE,
+  show.re.var = TRUE,
+  pred.labels = c(
+    "Intercept",
+    "Photopic illuminance, log10",
+    "Lights on",
+    "Baseline EMG, log10",
+    "Trial number"
+  ),
+  dv.labels = "OO-EMG response, log10",
+  file = here::here("outputs", "models", "emg_lmm_phot_model_table.html")
+)
+
+sjPlot::tab_model(
+  final_model_rho,
+  show.icc = TRUE,
+  show.r2 = TRUE,
+  show.re.var = TRUE,
+  pred.labels = c(
+    "Intercept",
+    "Rhodopic EDI, log10",
+    "Lights on",
+    "Baseline EMG, log10",
+    "Trial number"
+  ),
+  dv.labels = "OO-EMG response, log10",
+  file = here::here("outputs", "models", "emg_lmm_rho_model_table.html")
+)
 ```
 
 ```{r}
