@@ -44,6 +44,7 @@ Repository for the manuscript, data and code related to the Communications Psych
 
 - R version: **[4.4.0]**
 - RStudio
+- For generating counterbalanced stimulus sequences: the [`DeBruijn command-line software`](github.com/gkaguirrelab/DeBruijn).
 
 All R package dependencies are managed using [`renv`](https://rstudio.github.io/renv/).
 
@@ -52,6 +53,26 @@ The code was tested on MacOS 15.7.3 using R 4.4.0, and on Windows 11 Enterprise 
 ---
 
 ## Reproducing the analyses
+
+### 0. External command-line dependency: DeBruijn
+
+The stimulus sequence generation script requires the [`DeBruijn command-line software`](github.com/gkaguirrelab/DeBruijn).
+
+This tool is not managed by `renv` and must be installed separately.
+
+Clone and compile the software. After compiling the software, create a project-level `.Renviron` file containing the full path to the executable. For example, on macOS or Linux:
+
+```bash
+DEBRUIJN_EXE=/Users/yourname/DeBruijn/debruijn
+```
+
+or on Windows:
+
+```bash
+DEBRUIJN_EXE=C:/Users/yourname/DeBruijn/debruijn.exe
+```
+
+Restart R after creating or editing `.Renviron`.
 
 ### 1. Clone this repository
 
