@@ -14,7 +14,7 @@ output:
 .render_start <- Sys.time()
 ```
 
-```{r, include=FALSE}
+```{r knitr-options, include=FALSE}
 knitr::opts_chunk$set(
   warning = FALSE,
   message = FALSE
@@ -23,7 +23,7 @@ knitr::opts_chunk$set(
 
 # Setup
 
-```{r setup, warning=F, message=F}
+```{r setup, warning=FALSE, message=FALSE}
 # Seed for reproducibility
 seed <- 2025
 set.seed(seed)
@@ -41,6 +41,7 @@ library(tidyverse)
 library(furrr)
 library(patchwork)
 library(ggtext)
+library(progressr)
 
 # Paths
 source(here("R", "helpers.R"))
@@ -52,7 +53,7 @@ A few notes:
 - We define a function to simulate data from our fitted models
 - We simulate and visualise the data
 - Because the design matrix extends to lower light levels than what we had
-during the pilot study, we have to use extrapolation. Though, this means that
+during the pilot study, we have to use extrapolation. However, this means that
 simulated data might span values that are non-physiological, e.g. lower than
 what we observed for the 0-lx condition in the pilot study. So, we tried:
 1. Flooring non-physiological data. This introduces a non-linear component that 
@@ -74,7 +75,7 @@ simulation
 We use OO-EMG as our reference modality, as it is the most reliable and the 
 most indicative based on literature (see manuscript)
 
-```{r}
+```{r load-driver-models}
 m_mel <- readRDS(here("outputs", "models", "emg_lmm_mel.rds"))
 m_phot <- readRDS(here("outputs", "models", "emg_lmm_phot.rds"))
 m_rho <- readRDS(here("outputs", "models", "emg_lmm_rho.rds"))
@@ -89,7 +90,7 @@ driver_models <- tibble::tibble(
 
 …from `generate_design_matrix.Rmd`
 
-```{r}
+```{r load-design-matrix}
 design_matrix <- readr::read_csv(
   here::here("outputs", "design_matrix.csv"),
   show_col_types = FALSE
@@ -107,7 +108,7 @@ design_matrix <- readr::read_csv(
     log_melanopic_edi = log10(pmax(melanopic_edi, 1)),
     log_rhodopic_edi  = log10(pmax(rhodopic_edi, 1)),
 
-    lights_on = melanopic_edi != 0,
+    lights_on = melanopic_edi != 0
   )
 ```
 
@@ -118,7 +119,7 @@ across model frames. So we just use one model, for example the melanopic model.
 
 We first check it though:
 
-```{r}
+```{r check-baseline-model-frames}
 baseline_check <- driver_models %>%
   dplyr::mutate(
     log_baseline = purrr::map(model, ~ model.frame(.x)$log_baseline)
@@ -135,9 +136,12 @@ identical(
 )
 ```
 
-```{r}
+All identical as expected.
+We store `log_baseline` values, so we can resample from them during simulation
+
+```{r store-log-baseline}
 # -----------------------------
-# Simulate log_baseline using a shifted gamma distribution
+# Store observed log_baseline values for empirical resampling
 # -----------------------------
 
 model_frame <- m_mel$frame
@@ -145,30 +149,61 @@ model_frame <- m_mel$frame
 observed_log_baseline <- model_frame$log_baseline
 observed_log_baseline <- observed_log_baseline[is.finite(observed_log_baseline)]
 
-# Shift log_baseline so all values are positive, only if needed
-shift <- ifelse(min(observed_log_baseline) <= 0, abs(min(observed_log_baseline)) + 1e-7, 0)
-
-log_baseline_shifted <- observed_log_baseline + shift
-
-# Fit gamma parameters on shifted log_baseline
-baseline_mean <- mean(log_baseline_shifted)
-baseline_var <- var(log_baseline_shifted)
-
-gamma_shape <- baseline_mean^2 / baseline_var
-gamma_rate <- baseline_mean / baseline_var
-
-if (!is.finite(gamma_shape) || !is.finite(gamma_rate) ||
-    gamma_shape <= 0 || gamma_rate <= 0) {
-  stop("Invalid shifted-gamma parameters for log_baseline.", call. = FALSE)
+if (length(observed_log_baseline) == 0) {
+  stop(
+    "No finite observed log_baseline values available for resampling.",
+    call. = FALSE
+  )
 }
 
-design_matrix <- design_matrix %>%
+# Quick visual check of the empirical baseline distribution
+tibble::tibble(
+  log_baseline = observed_log_baseline
+) %>%
+  ggplot2::ggplot(
+    ggplot2::aes(x = log_baseline)
+  ) +
+  ggplot2::geom_histogram(bins = 30, colour = "white") +
+  ggplot2::theme_classic() +
+  ggplot2::labs(
+    x = "Observed log_baseline",
+    y = "Count",
+    title = "Empirical distribution used for baseline resampling"
+  )
+```
+
+```{r}
+# -----------------------------
+# Simulate log_baseline by empirical resampling
+# -----------------------------
+
+model_frame <- m_mel$frame
+
+observed_log_baseline <- model_frame$log_baseline
+observed_log_baseline <- observed_log_baseline[is.finite(observed_log_baseline)]
+
+if (length(observed_log_baseline) == 0) {
+  stop("No finite observed log_baseline values available for resampling.", call. = FALSE)
+}
+
+# Resample one baseline value per planned participant.
+# This keeps log_baseline constant within participant, which is usually more
+# appropriate than drawing a new baseline for every row/trial.
+baseline_by_participant <- design_matrix %>%
+  dplyr::distinct(participant_id) %>%
   dplyr::mutate(
-    log_baseline = rgamma(
-      n = dplyr::n(),
-      shape = gamma_shape,
-      rate = gamma_rate
-    ) - shift
+    log_baseline = sample(
+      observed_log_baseline,
+      size = dplyr::n(),
+      replace = TRUE
+    )
+  )
+
+design_matrix <- design_matrix %>%
+  dplyr::select(-dplyr::any_of("log_baseline")) %>%
+  dplyr::left_join(
+    baseline_by_participant,
+    by = "participant_id"
   )
 
 # Observed vs simulated
@@ -177,7 +212,7 @@ observed_plot_df <- tibble::tibble(
   log_baseline = observed_log_baseline
 )
 
-simulated_plot_df <- design_matrix %>%
+simulated_plot_df <- baseline_by_participant %>%
   dplyr::select(log_baseline) %>%
   dplyr::mutate(source = "Simulated")
 
@@ -190,19 +225,21 @@ ggplot(plot_df, aes(x = log_baseline)) +
   labs(
     x = "log_baseline",
     y = "Count",
-    title = "Observed vs simulated log_baseline"
+    title = "Observed vs empirically resampled log_baseline"
   )
 ```
+
 
 # Define functions
 
 ## Data simulation
 
-```{r}
+```{r define-simulation-function}
 simulate_from_design <- function(design_df,
                                  model,
                                  sd_scaling = 1,
-                                 seed = seed) {
+                                 seed = seed,
+                                 baseline_pool = NULL) {
   if (!is.null(seed)) {
     set.seed(seed)
   }
@@ -229,6 +266,30 @@ simulate_from_design <- function(design_df,
       trial = as.numeric(trial),
       lights_on = as.logical(lights_on)
     )
+  
+  # Optionally resample log_baseline for every row/trial.
+  # Because this happens inside simulate_from_design(), each simulation replicate
+  # receives a fresh set of baseline values.
+  if (!is.null(baseline_pool)) {
+    
+    baseline_pool <- baseline_pool[is.finite(baseline_pool)]
+    
+    if (length(baseline_pool) == 0) {
+      stop(
+        "`baseline_pool` contains no finite values.",
+        call. = FALSE
+      )
+    }
+    
+    dat <- dat %>%
+      dplyr::mutate(
+        log_baseline = sample(
+          baseline_pool,
+          size = dplyr::n(),
+          replace = TRUE
+        )
+      )
+  }
 
   # Variables needed by the model RHS, including random-effect grouping variables
   required_vars <- all.vars(stats::formula(model)[[3]])
@@ -444,13 +505,14 @@ simulate_from_design <- function(design_df,
 # simulated_data <- simulate_from_design(
 #   design_df = design_matrix,
 #   model = m,
-#   sd_scaling = 1
+#   sd_scaling = 1,
+#   baseline_pool = observed_log_baseline
 # )
 ```
 
 ### Visualise simulations against original data
 
-```{r}
+```{r visualise-simulations}
 vis_sim_vs_original <- function(model,
                                 driver = c("mel", "phot", "rho"),
                                 sd_scaling = 1,
@@ -518,7 +580,8 @@ vis_sim_vs_original <- function(model,
     design_df = design_matrix,
     model = model,
     sd_scaling = sd_scaling,
-    seed = sim_seed
+    seed = sim_seed,
+    baseline_pool = observed_log_baseline
   ) %>%
     dplyr::mutate(
       x_plot = .data[[x_raw_var]],
@@ -672,34 +735,39 @@ vis_sim_vs_original <- function(model,
   return(p)
 }
 
-noise_levels <- c(0.1, 1, 5)
+vis_sim_vs_original(
+  model = m_mel,
+  driver = "mel",
+  sd_scaling = 1, 
+  facet = TRUE
+)
 
-sim_vs_original_plots <- driver_models %>%
-  tidyr::crossing(sd_scaling = noise_levels) %>%
-  dplyr::mutate(
-    plot = purrr::pmap(
-      list(model, driver, sd_scaling),
-      ~ vis_sim_vs_original(
-        model = ..1,
-        driver = ..2,
-        sd_scaling = ..3,
-        facet = TRUE
-      )
-    )
-  )
+vis_sim_vs_original(
+  model = m_phot,
+  driver = "phot",
+  sd_scaling = 1, 
+  facet = TRUE
+)
 
-purrr::walk(sim_vs_original_plots$plot, print)
+vis_sim_vs_original(
+  model = m_rho,
+  driver = "rho",
+  sd_scaling = 1, 
+  facet = TRUE
+)
 ```
 
 To make it clear, for the power analysis, we will only use the yellow part
 of the plots above, i.e. exclude the non-physiological data
+
+This discarded data (red on the plots) reflects the stimulus design. Because the design is weighted toward the short-wavelength region, it favours melanopic and rhodopic stimulation more than photopic stimulation. Consequently, photopic illuminance reaches lower minimum values, down to approximately 2 lx, whereas melanopic and rhodopic EDI remain higher, at approximately 10 and 15 lx. Under a photopic generative model, these low illuminance values make simulated responses more likely to fall below the physiological lower bound. These responses are then discarded before model fitting. This explains why photopic-driver simulations show more discarded data, as illustrated in the final discard-summary plot.
 
 # Collinearity of predictors
 
 We first look at collinearity of melanopic EDI, illuminance and rhodopic EDI
 If high collinearity, we cannot have all predictors in the same model…
 
-```{r}
+```{r check-predictor-collinearity}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -712,7 +780,13 @@ design_matrix %>%
   )
 
 # Simulate data
-sim_dat <- simulate_from_design(design_df = design_matrix, model = m_mel, sd_scaling = 1, seed = seed)
+sim_dat <- simulate_from_design(
+  design_df = design_matrix, 
+  model = m_mel, 
+  sd_scaling = 1, 
+  seed = seed, 
+  baseline_pool = observed_log_baseline
+)
 
 formula_model_col <- log10(simulated_emg) ~ 
   log_illuminance + 
@@ -728,14 +802,14 @@ cov2cor(vcov(model_col))
 performance::check_collinearity(model_col)
 ```
 
--> Very high collinearity issues. Model struggles
+Very high collinearity issues. Model struggles
 The issue comes from melanopic and rhodopic curves being so close to each other.
 
 We therefore cannot use such a model.
 
 # Model fit comparisons
 
-```{r}
+```{r model-fit-comparisons}
 ## Model fit comparisons with diagnostics
 ## glmmTMB only
 
@@ -772,6 +846,7 @@ fit_one_model <- function(formula, dat, model_name) {
         diagnostics = tibble::tibble(
           model_name = model_name,
           converged = FALSE,
+          singular = NA,
           convergence_code = NA_integer_,
           pdHess = NA,
           fit_message = NA_character_,
@@ -789,6 +864,11 @@ fit_one_model <- function(formula, dat, model_name) {
   
   converged <- isTRUE(convergence_code == 0) && isTRUE(pdHess)
   
+  singular <- tryCatch(
+    as.logical(performance::check_singularity(model)),
+    error = function(e) NA
+  )
+  
   aic <- tryCatch(AIC(model), error = function(e) NA_real_)
   
   list(
@@ -796,6 +876,7 @@ fit_one_model <- function(formula, dat, model_name) {
     diagnostics = tibble::tibble(
       model_name = model_name,
       converged = converged,
+      singular = singular,
       convergence_code = convergence_code,
       pdHess = pdHess,
       fit_message = fit_message,
@@ -959,13 +1040,43 @@ We dropped random slopes here because they were causing convergence issues.
 
 # Run loop
 
-```{r warning=F}
+The analysis uses up to 6 cores, depending on the CPU the code is being run on
+
+```{r run-loop, warning=FALSE}
 n_simulations <- 1000
+
+available_cores <- parallel::detectCores(logical = FALSE)
+
+# As the line above can return NA:
+if (is.na(available_cores)) {
+  available_cores <- parallel::detectCores(logical = TRUE)
+}
+
+if (is.na(available_cores)) {
+  available_cores <- 2
+}
+
+# Never use more than 6 cores
+n_workers <- min(
+  6,
+  max(1, available_cores - 1)
+)
+
+message("Using ", n_workers, " parallel workers.")
 
 future::plan(
   future::multisession,
-  workers = max(1, parallel::detectCores() - 1)
+  workers = n_workers
 )
+
+message("Using ", n_workers, " parallel workers.")
+
+future::plan(
+  future::multisession,
+  workers = n_workers
+)
+
+options(progressr.enable = TRUE)
 
 run_aic_sim <- function(
     n_sims = 1000,
@@ -991,7 +1102,7 @@ run_aic_sim <- function(
     )
   }
   
-  selected_subjects <- available_subjects[seq_len(n_subjects)]
+  selected_subjects <- sample(available_subjects, n_subjects, replace = FALSE)
   
   design_subset <- design_matrix %>%
     dplyr::filter(participant_id %in% selected_subjects) %>%
@@ -999,18 +1110,26 @@ run_aic_sim <- function(
       participant_id = factor(participant_id)
     )
   
-  sim_results <- furrr::future_map(
+  sim_results <- purrr::map(
     seq_len(n_sims),
     ~ {
       sim_data <- simulate_from_design(
         design_df = design_subset,
         model = gen_model,
         sd_scaling = noise_scaling,
-        seed = NULL
+        seed = NULL,
+        baseline_pool = observed_log_baseline
       )
+      
+      # Track how much data would be discarded because it hit the physiological floor
+      n_rows_before_discard <- nrow(sim_data)
+      n_rows_floored <- sum(sim_data$floored, na.rm = TRUE)
+      prop_floored <- mean(sim_data$floored, na.rm = TRUE)
       
       sim_data <- sim_data %>% 
         dplyr::filter(floored == FALSE)
+      
+      n_rows_after_discard <- nrow(sim_data)
       
       fits <- fit_models(
         dat = sim_data,
@@ -1022,17 +1141,6 @@ run_aic_sim <- function(
         delta_aic_threshold = delta_aic_threshold
       )
       
-      data_diagnostics <- tibble::tibble(
-        n_obs = nrow(sim_data),
-        n_participants = dplyr::n_distinct(sim_data$participant_id),
-        n_lab_visits = dplyr::n_distinct(sim_data$lab_visit),
-        sd_response = stats::sd(sim_data[[response]], na.rm = TRUE),
-        sd_log_melanopic_edi = stats::sd(sim_data$log_melanopic_edi, na.rm = TRUE),
-        sd_log_illuminance = stats::sd(sim_data$log_illuminance, na.rm = TRUE),
-        sd_log_rhodopic_edi = stats::sd(sim_data$log_rhodopic_edi, na.rm = TRUE),
-        prop_floored = mean(sim_data$floored, na.rm = TRUE)
-      )
-      
       diagnostics <- fits$diagnostics %>%
         dplyr::mutate(
           sim_id = .x,
@@ -1040,9 +1148,6 @@ run_aic_sim <- function(
           n_subjects = n_subjects,
           noise_scaling = noise_scaling,
           response = response
-        ) %>%
-        dplyr::bind_cols(
-          data_diagnostics[rep(1, nrow(.)), ]
         )
       
       list(
@@ -1052,19 +1157,30 @@ run_aic_sim <- function(
             driver = driver,
             n_subjects = n_subjects,
             noise_scaling = noise_scaling,
-            response = response
+            response = response,
+            n_rows_before_discard = n_rows_before_discard,
+            n_rows_floored = n_rows_floored,
+            n_rows_after_discard = n_rows_after_discard,
+            prop_floored = prop_floored
           ),
         diagnostics = diagnostics
       )
-    },
-    .options = furrr::furrr_options(seed = TRUE)
+    }
   )
   
   aic_results <- purrr::map_dfr(sim_results, "aic_result")
-  diagnostics <- purrr::map_dfr(sim_results, "diagnostics")
+  
+  diagnostics_summary <- purrr::map_dfr(sim_results, "diagnostics") %>%
+    dplyr::group_by(driver, n_subjects, noise_scaling, response, model_name) %>%
+    dplyr::summarise(
+      prop_converged = mean(converged, na.rm = TRUE),
+      prop_singular = mean(singular, na.rm = TRUE),
+      n_fits = dplyr::n(),
+      .groups = "drop"
+    )
   
   evidence_list <- aic_results$evidence
-
+  
   n_valid <- sum(!is.na(evidence_list))
   n_failed <- sum(is.na(evidence_list))
   
@@ -1099,11 +1215,11 @@ run_aic_sim <- function(
       response = response
     )
   }
-    
+  
   list(
     summary = summary,
     aic_results = aic_results,
-    diagnostics = diagnostics
+    diagnostics_summary = diagnostics_summary
   )
 }
 
@@ -1113,43 +1229,49 @@ grid <- tidyr::expand_grid(
   noise_scaling = c(0.5, 1, 2, 4, 6, 8, 10)
 )
 
-aic_nested <- grid %>%
-  dplyr::mutate(
-    results = purrr::pmap(
-      list(driver, model, n_subjects, noise_scaling),
-      ~ {
-        cat(
-          "Running: driver =", ..1,
-          " subjects =", ..3,
-          " noise =", ..4,
-          "\n"
+aic_nested <- progressr::with_progress(
+  {
+    p <- progressr::progressor(steps = nrow(grid))
+    
+    results <- furrr::future_map(
+      seq_len(nrow(grid)),
+      function(i) {
+        out <- run_aic_sim(
+          n_sims = n_simulations,
+          driver = grid$driver[[i]],
+          gen_model = grid$model[[i]],
+          n_subjects = grid$n_subjects[[i]],
+          noise_scaling = grid$noise_scaling[[i]]
         )
         
-        run_aic_sim(
-          n_sims = n_simulations,
-          driver = ..1,
-          gen_model = ..2,
-          n_subjects = ..3,
-          noise_scaling = ..4
-        )
-      }
+        p(sprintf(
+          "completed: driver = %s | subjects = %s | noise = %s",
+          grid$driver[[i]],
+          grid$n_subjects[[i]],
+          grid$noise_scaling[[i]]
+        ))
+        
+        out
+      },
+      .options = furrr::furrr_options(
+        seed = TRUE,
+        scheduling = Inf,
+        stdout = TRUE,
+        conditions = "condition"
+      )
     )
-  )
+    
+    grid %>%
+      dplyr::mutate(results = results)
+  },
+  handlers = progressr::handler_txtprogressbar()
+)
 
-aic_diagnostics <- aic_nested %>%
+aic_diagnostics_summary <- aic_nested %>%
   dplyr::transmute(
-    driver,
-    n_subjects,
-    noise_scaling,
-    diagnostics = purrr::map(
-      results,
-      ~ .x$diagnostics %>%
-        dplyr::select(
-          -dplyr::any_of(c("driver", "n_subjects", "noise_scaling"))
-        )
-    )
+    diagnostics_summary = purrr::map(results, "diagnostics_summary")
   ) %>%
-  tidyr::unnest(diagnostics)
+  tidyr::unnest(diagnostics_summary)
 
 aic_per_sim <- aic_nested %>%
   dplyr::transmute(
@@ -1165,6 +1287,30 @@ aic_per_sim <- aic_nested %>%
     )
   ) %>%
   tidyr::unnest(aic_results)
+
+discard_summary <- aic_per_sim %>%
+  dplyr::group_by(driver, n_subjects, noise_scaling, response) %>%
+  dplyr::summarise(
+    mean_prop_floored = mean(prop_floored, na.rm = TRUE),
+    sd_prop_floored = sd(prop_floored, na.rm = TRUE),
+    median_prop_floored = median(prop_floored, na.rm = TRUE),
+    min_prop_floored = min(prop_floored, na.rm = TRUE),
+    max_prop_floored = max(prop_floored, na.rm = TRUE),
+    mean_n_rows_before_discard = mean(n_rows_before_discard, na.rm = TRUE),
+    mean_n_rows_floored = mean(n_rows_floored, na.rm = TRUE),
+    mean_n_rows_after_discard = mean(n_rows_after_discard, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+discard_by_driver <- discard_summary %>%
+  dplyr::group_by(driver) %>%
+  dplyr::summarise(
+    mean_discarded_pct = mean(mean_prop_floored, na.rm = TRUE) * 100,
+    sd_discarded_pct = sd(mean_prop_floored, na.rm = TRUE) * 100,
+    min_discarded_pct = min(mean_prop_floored, na.rm = TRUE) * 100,
+    max_discarded_pct = max(mean_prop_floored, na.rm = TRUE) * 100,
+    .groups = "drop"
+  )
 
 evidence_levels <- c(
   "Favours mel model",
@@ -1196,35 +1342,73 @@ evidence_props <- aic_per_sim %>%
   ) %>%
   dplyr::ungroup()
 
-evidence_props
+glimpse(aic_diagnostics_summary)
+glimpse(aic_per_sim)
+glimpse(discard_summary)
+glimpse(discard_by_driver)
+glimpse(evidence_props)
 ```
 
-```{r}
-readr::write_csv(
-  aic_diagnostics,
-  here::here("outputs", "power_analysis", "power_analysis_diagnostics.csv")
+```{r save-results}
+output_dir <- here::here("outputs", "power_analysis")
+
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+saveRDS(
+  aic_per_sim,
+  file.path(output_dir, "power_analysis_full_results.rds")
 )
 
 readr::write_csv(
-  aic_per_sim,
-  here::here("outputs", "power_analysis", "power_analysis_full_results.csv")
+  aic_diagnostics_summary,
+  file.path(output_dir, "power_analysis_diagnostics_summary.csv")
+)
+
+readr::write_csv(
+  discard_summary,
+  file.path(output_dir, "power_analysis_discard_summary.csv")
 )
 
 readr::write_csv(
   evidence_props,
-  here::here("outputs", "power_analysis", "power_analysis_evidence_props.csv")
+  file.path(output_dir, "power_analysis_evidence_props.csv")
 )
 ```
 
-# Plotting results
+Proportion of discarded simulated data does not depend on noise scaling or
+sample size:
 
 ```{r}
-aic_diagnostics <- read.csv(here::here("outputs", "power_analysis", "power_analysis_diagnostics.csv"))
-evidence_props <- read.csv(here::here("outputs", "power_analysis", "power_analysis_evidence_props.csv"))
+# discard_summary_clean <- discard_summary %>%
+#   filter(response == "simulated_log10") %>%
+#   mutate(
+#     n_subjects_c = scale(n_subjects, center = TRUE, scale = TRUE)[, 1],
+#     noise_scaling_c = scale(noise_scaling, center = TRUE, scale = TRUE)[, 1]
+#   )
+
+m_lm <- lm(
+  mean_prop_floored ~ driver + n_subjects + noise_scaling,
+  data = discard_summary
+)
+
+summary(m_lm)
+confint(m_lm)
+tidy(m_lm, conf.int = TRUE)
 ```
 
 
-```{r}
+# Plotting results
+
+```{r reload-data}
+# aic_per_sim <- readRDS(here::here("outputs", "power_analysis", "power_analysis_full_results.csv"))
+
+# aic_diagnostics_summary <- read.csv(here::here("outputs", "power_analysis", "power_analysis_diagnostics_summary.csv"))
+# discard_summary <- read.csv(here::here("outputs", "power_analysis", "power_analysis_discard_summary.csv"))
+# evidence_props <- read.csv(here::here("outputs", "power_analysis", "power_analysis_evidence_props.csv"))
+```
+
+
+```{r plot-results}
 chosen_n <- 20
 chosen_n_position <- which(sort(unique(evidence_props$n_subjects)) == chosen_n)
 
@@ -1336,12 +1520,7 @@ plot_power_2 <- evidence_props %>%
   ggplot2::theme_minimal() +
   plot_formatting
 
-plot_convergence <- aic_diagnostics %>%
-  dplyr::group_by(driver, n_subjects, noise_scaling, model_name) %>%
-  dplyr::summarise(
-    prop_converged = mean(converged),
-    .groups = "drop"
-  ) %>%
+plot_convergence <- aic_diagnostics_summary %>%
   ggplot2::ggplot(
     ggplot2::aes(
       x = n_subjects,
@@ -1385,10 +1564,52 @@ plot_convergence <- aic_diagnostics %>%
   ggplot2::theme_minimal() +
   plot_formatting
 
+plot_discarded <- discard_summary %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = n_subjects,
+      y = factor(noise_scaling),
+      fill = mean_prop_floored
+    )
+  ) +
+  ggplot2::geom_tile() +
+  ggplot2::geom_vline(
+    ggplot2::aes(
+      xintercept = chosen_n,
+      linetype = "Chosen sample size"
+    ),
+    colour = "grey30",
+    linewidth = 0.7
+  ) +
+  ggplot2::scale_linetype_manual(
+    name = NULL,
+    values = c("Chosen sample size" = "dashed")
+  ) +
+  ggplot2::scale_fill_viridis_c(
+    labels = scales::percent_format(accuracy = 1),
+    limits = c(0, NA)
+  ) +
+  ggplot2::facet_wrap(
+    ~ driver,
+    labeller = clean_facet_labels
+  ) +
+  ggplot2::labs(
+    x = "Number of participants",
+    y = "Noise scaling",
+    fill = "Discarded rows",
+    title = "Proportion of simulated rows discarded as non-physiological"
+  ) +
+  ggplot2::theme_minimal() +
+  plot_formatting
+
 plot_power
 plot_power_2
 plot_convergence
+plot_discarded
+```
 
+
+```{r save-plots}
 save_rds_safe(
   plot_power,
   here::here("outputs", "figures", "rds", glue::glue("power_analysis_evidence.rds"))
@@ -1424,9 +1645,26 @@ formatted_save(
   width = 9, 
   height = 7
 )
+
+save_rds_safe(
+  plot_discarded,
+  here::here(
+    "outputs",
+    "figures",
+    "rds",
+    glue::glue("power_analysis_discarded_data.rds")
+  )
+)
+
+formatted_save(
+  here::here("outputs", "figures", "power_analysis_discarded_data.jpg"), 
+  plot_discarded, 
+  width = 9, 
+  height = 7
+)
 ```
 
-```{r}
+```{r session-info}
 sessionInfo()
 ```
 
