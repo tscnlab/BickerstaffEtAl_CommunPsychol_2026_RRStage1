@@ -14,7 +14,7 @@ output:
 .render_start <- Sys.time()
 ```
 
-```{r, include=FALSE}
+```{r knitr-options, include=FALSE}
 knitr::opts_chunk$set(
   warning = FALSE,
   message = FALSE
@@ -47,7 +47,7 @@ source(here("R", "plot_settings.R"))
 
 # Read EMG data
 
-```{r}
+```{r read-emg-data}
 # ------------------------------------------------------------------------------
 # Prepare trial-level EMG data for modelling
 # ------------------------------------------------------------------------------
@@ -153,11 +153,11 @@ excluded_rows <- nrow(data) - nrow(model_data)
 excluded_rows
 ```
 
-`excluded_rows` records how many rows were removed because one or more variables required by the log-transformed model were missing or non-positive.
+`excluded_rows` records how many rows were removed because `emg_raw` was non-positive before log-transforming the response.
 
 ## Visualise
 
-```{r}
+```{r visualise-emg-by-edi}
 #| warning: false
 #| message: false
 #| fig-width: 12
@@ -202,7 +202,7 @@ Plot_scaled_log10 <-
 
 ## Helpers
 
-```{r}
+```{r fit-glmmtmb-helpers}
 fit_glmmTMB <- function(formula, data) {
   data_name <- substitute(data)
 
@@ -248,7 +248,7 @@ check_glmmTMB <- function(model, save_path = NULL) {
 
 ## Random effects for melanopic EDI?
 
-```{r}
+```{r fit-no-random-effects}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -261,7 +261,7 @@ m0 <- fit_glmmTMB(form_m0, model_data)
 check_glmmTMB(m0)
 ```
 
-```{r}
+```{r fit-random-slope-model}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -275,7 +275,7 @@ m1 <- fit_glmmTMB(form_m1, model_data)
 check_glmmTMB(m1)
 ```
 
-```{r}
+```{r fit-random-intercept-model}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -289,7 +289,7 @@ m2 <- fit_glmmTMB(form_m2, model_data)
 check_glmmTMB(m2)
 ```
 
-```{r}
+```{r compare-random-effects-aic}
 AIC(m0, m1, m2)
 ```
 
@@ -298,7 +298,7 @@ Keeping random slopes is warranted here.
 
 ## Include baseline?
 
-```{r}
+```{r fit-baseline-model}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -313,7 +313,7 @@ m3 <- fit_glmmTMB(form_m3, model_data)
 check_glmmTMB(m3)
 ```
 
-```{r}
+```{r compare-baseline-aic}
 AIC(m1, m3)
 ```
 
@@ -322,7 +322,7 @@ Including baseline is warranted here.
 
 ## Include trial number?
 
-```{r}
+```{r fit-trial-model}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -338,14 +338,14 @@ m4 <- fit_glmmTMB(form_m4, model_data)
 check_glmmTMB(m4, save_path = here::here("outputs", "models", "emg_lmm_mel_diag.png"))
 ```
 
-```{r}
+```{r compare-trial-aic}
 AIC(m3, m4)
 ```
 
 `m4` is the better fit.
 Including trial number is warranted.
 
-```{r}
+```{r visualise-final-melanopic-model}
 #| fig-width: 8
 #| fig-height: 6
 
@@ -355,7 +355,7 @@ visreg(m4, xvar = "lights_on", jitter = TRUE)
 
 # Why not a model with all predictors?
 
-```{r}
+```{r fit-full-collinearity-model}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -375,13 +375,11 @@ m5 <- fit_glmmTMB(form_m5, model_data)
 check_glmmTMB(m5)
 ```
 
-A model with all predictors suffers from collinearity issues, because the
-melanopic and rhodopic curves are very close to each other and the model
-cannot decide between the two…
+A model with all predictors suffers from collinearity issues, because the fixed-spectrum design keeps melanopic EDI, photopic illuminance, and rhodopic EDI highly correlated. The model therefore cannot reliably attribute the response to one metric over the others.
 
 # Predictions against actual data
 
-```{r}
+```{r prediction-helpers}
 #| warning: false
 #| message: false
 #| fig-width: 8
@@ -557,7 +555,7 @@ plot_observed_vs_predicted <- function(data,
 }
 ```
 
-```{r}
+```{r make-melanopic-predictions}
 thres <- 2
 
 pred_df <- model_data |>
@@ -592,9 +590,9 @@ detailed on this in the relevant file: `power_analysis.Rmd`
 # Create photopic and rhodopic models, too
 
 This allows to assume that cones/rods are driving the responses, instead of just
-assuming that ipRGCs are the only driver…
+assuming that ipRGCs are the only driver.
 
-```{r}
+```{r fit-photopic-model}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -610,7 +608,7 @@ m4_phot <- fit_glmmTMB(form_m4_phot, model_data)
 check_glmmTMB(m4_phot, save_path = here::here("outputs", "models", "emg_lmm_phot_diag.png"))
 ```
 
-```{r}
+```{r fit-rhodopic-model}
 #| fig-width: 8
 #| fig-height: 12
 
@@ -619,23 +617,22 @@ form_m4_rho <- log_emg_raw ~
   lights_on +
   log_baseline +
   trial +
-  (log_illuminance | participant_id)
+  (log_rhodopic_edi | participant_id)
 
 m4_rho <- fit_glmmTMB(form_m4_rho, model_data)
 
 check_glmmTMB(m4_rho, save_path = here::here("outputs", "models", "emg_lmm_rho_diag.png"))
 ```
 
-```{r}
+```{r compare-driver-models-aic}
 AIC(m4, m4_phot, m4_rho)
 ```
 
-As expected, the three models are pretty much equivalent, because we keep the
-spectrum constant, the ratios between the metrics remain constant too
+As expected, the three models are very similar because the spectrum is fixed, so the ratios between the light metrics remain approximately constant.
 
 # Saving final models
 
-```{r}
+```{r save-final-models}
 # Final models -------------------------------------------------------------
 
 final_model_mel <- m4
@@ -677,7 +674,7 @@ purrr::iwalk(
 
 # Manuscript-ready outputs
 
-```{r}
+```{r write-coefficient-table}
 # Coefficient table --------------------------------------------------------
 
 coef_table <- purrr::imap_dfr(
@@ -690,9 +687,12 @@ coef_table <- purrr::imap_dfr(
     dplyr::mutate(
       model = .y,
       model_label = model_labels[[.y]],
-      estimate_exp = exp(estimate),
-      conf.low_exp = exp(conf.low),
-      conf.high_exp = exp(conf.high)
+      estimate_fold_change = 10^estimate,
+      conf.low_fold_change = 10^conf.low,
+      conf.high_fold_change = 10^conf.high,
+      estimate_percent_change = (estimate_fold_change - 1) * 100,
+      conf.low_percent_change = (conf.low_fold_change - 1) * 100,
+      conf.high_percent_change = (conf.high_fold_change - 1) * 100
     )
 )
 
@@ -704,7 +704,7 @@ readr::write_csv(
 coef_table
 ```
 
-```{r}
+```{r write-model-summaries}
 # Model summaries ---------------------------------------------------------
 
 model_summaries <- purrr::imap_dfr(
@@ -732,7 +732,7 @@ readr::write_csv(
 model_summaries
 ```
 
-```{r, results='asis'}
+```{r write-html-model-tables, results='asis'}
 # Save manuscript-style HTML model tables ---------------------------------
 
 dir.create(
@@ -790,7 +790,7 @@ sjPlot::tab_model(
 )
 ```
 
-```{r}
+```{r session-info}
 sessionInfo()
 ```
 
