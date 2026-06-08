@@ -14,7 +14,7 @@ output:
 .render_start <- Sys.time()
 ```
 
-```{r, include=FALSE}
+```{r knitr-options, include=FALSE}
 knitr::opts_chunk$set(
   warning = FALSE,
   message = FALSE
@@ -23,7 +23,7 @@ knitr::opts_chunk$set(
 
 # Setup
 
-```{r setup, warning=F, message=F}
+```{r setup, warning=FALSE, message=FALSE}
 # Seed for reproducibility
 set.seed(2025)
 
@@ -42,7 +42,7 @@ source(here("R", "plot_settings.R"))
 
 # Function to preprocess the spectral data
 
-```{r}
+```{r export-jeti-spectra}
 export_jeti_spectra_csv <- function(input_xlsx,
                                     output_csv,
                                     sheet = 1,
@@ -164,12 +164,11 @@ export_jeti_spectra_csv(
 )
 ```
 
-The preprocessed data is then passed to luox to calculate alpha-opic quantities.
--> we go from data step 2 (preprocessed) to step 3 (luox)
+The preprocessed data are then passed to Luox to calculate alpha-opic quantities. This moves the data from step 2 (preprocessed spectra) to step 3 (Luox outputs).
 
-We then extract relevant outcomes from step 3:
+We then extract the relevant outcomes from step 3:
 
-```{r}
+```{r prepare-luox-outcomes}
 prepare_outcomes <- function(
   file_stub,
   luox_suffix = "_luox.csv",
@@ -290,7 +289,7 @@ prepare_outcomes <- function(
 
 # Prepare calibration data
 
-```{r}
+```{r prepare-calibration-data}
 calibration <- prepare_outcomes("1_calibration_reference")
 
 calibration <- calibration %>% 
@@ -364,9 +363,9 @@ readr::write_csv(
 )
 ```
 
-## Control plots…
+## Control plots
 
-```{r}
+```{r plot-calibration-control}
 ggplot(data=calibration, aes(x=setting, y=irradiance)) +
   geom_point() +
   labs(title = "Irradiance") +
@@ -395,7 +394,7 @@ ggplot(data=calibration, aes(x=setting, y=rho_edi)) +
 
 # Find max possible irradiance for each primary of interest
 
-```{r echo=TRUE, fold=FALSE}
+```{r find-primary-max-irradiance, echo=TRUE, fold=FALSE}
 calibration_select <- calibration %>%
   dplyr::filter(primary %in% as.character(2:7))
 
@@ -417,7 +416,7 @@ This is the maxmimum irradiance we can achieve across all primaries.
 
 Four target irradiance values for each of the four lab visits
 
-```{r echo=TRUE, fold=FALSE}
+```{r define-target-irradiances, echo=TRUE, fold=FALSE}
 decrease_factor <- 150 # how much smaller the min irradiance value is compared to the max value
 
 max_val <- min_irradiance
@@ -432,7 +431,7 @@ irradiance_levels
 
 We interpolate the data so we have a [setting] -> [intensity metric] map
 
-```{r echo=TRUE, fold=FALSE}
+```{r interpolate-primary-settings, echo=TRUE, fold=FALSE}
 # Define target settings (full interpolation range)
 all_settings <- 0:4095  # start from 0 now
 
@@ -495,9 +494,9 @@ interp_data <- calibration %>%
   ungroup()
 ```
 
-## Control plots…
+## Control plots
 
-```{r}
+```{r plot-interpolation-control}
 # Irradiance
 ggplot(interp_data, aes(x = setting, y = Ee, color = primary)) +
   geom_line() +
@@ -539,7 +538,7 @@ ggplot(interp_data, aes(x = setting, y = REDI, color = primary)) +
 
 Now, we just map our target irradiance levels to the desired settings…
 
-```{r warning=F, echo=TRUE, fold=FALSE}
+```{r map-targets-to-settings, warning=FALSE, echo=TRUE, fold=FALSE}
 interp_data_all <- interp_data # keeping old df…
 
 interp_data <- interp_data %>% 
@@ -580,7 +579,7 @@ mapped_settings <- expand_grid(
 
 Extracted from Spectra Tune Lab manual
 
-```{r}
+```{r add-peak-wavelengths}
 peak_nm_df <- data.frame(primary = factor(c(1:10)),
                          peak_nm = c(430, 445, 465, 475, 505, 525, 545, 595, 640, 660),
                          color = c("UV", "Royal blue", "Dark blue", "Blue", "Cyan", "Green", "Lime", "PC Amber", "Red", "Deep red"))
@@ -592,17 +591,17 @@ mapped_settings
 
 # Calculate coverage in log10 units
 
-```{r}
+```{r calculate-log-coverage}
 irradiance_levels_log10 <- log10(mapped_settings$irradiance_theoretical)
 coverage <- max(irradiance_levels_log10) - min(irradiance_levels_log10)
 coverage
 ```
 
-# Check settings…
+# Check settings
 
 Here we did calibration measurements to check whether the calculated settings are as expected in terms of output
 
-```{r fig.width=5, fig.height=3}
+```{r check-target-settings, fig.width=5, fig.height=3}
 # calculated settings and theoretical irradiance, illuminance and mel EDI 
 theoretical <- mapped_settings
 
@@ -691,7 +690,7 @@ data_measured_1 <- merge_theoretical_measured(
 
 # Visualise differences between calculated and measured 
 
-```{r}
+```{r compare-calculated-measured}
 plot_diff_measured <- function(df, save = FALSE) {
   
   col_vals <- colorRampPalette(c("gold", "red3"))(4)
@@ -826,13 +825,13 @@ plot_diff_measured <- function(df, save = FALSE) {
 }
 ``` 
 
-```{r fig.width=5, fig.height=3}
+```{r plot-calculated-measured-differences, fig.width=5, fig.height=3}
 plot_diff_measured(data_measured_1)
 ```
 
 # Visualise differences in measured metrics between primaries
 
-```{r}
+```{r plot-primary-metric-differences}
 plot_diff_metrics <- function(df, save = FALSE) {
   
   # ----------------------------
@@ -1146,14 +1145,14 @@ plot_diff_metrics <- function(df, save = FALSE) {
 }
 ```
 
-```{r fig.width=5, fig.height=3}
+```{r create-final-calibration-plot, fig.width=5, fig.height=3}
 plot_diff_metrics(data_measured_1)
 ```
 
 We see that for the second lab visit, the irradiance is not matched…
 So, we manually correct it and check with new spectral measurements
 
-```{r fig.width=5, fig.height=3}
+```{r check-corrected-settings, fig.width=5, fig.height=3}
 data_measured_2 <- merge_theoretical_measured(
   theoretical_data = theoretical, 
   measured_data_filename = "2b_target_settings_corrected"
@@ -1180,7 +1179,7 @@ Main thing is that the irradiance is constant across primaries, and well log-spa
 
 # Create and save final plot
 
-```{r}
+```{r import-final-plots}
 # import plots
 plot_irradiance <- readRDS(here("outputs/figures/rds", "calibration_irradiance.rds"))
 plot_ratio_mel_pho <- readRDS(here("outputs/figures/rds", "calibration_melanopic_vs_photopic.rds"))
@@ -1188,7 +1187,7 @@ plot_ratio_rho_pho <- readRDS(here("outputs/figures/rds", "calibration_rhodopic_
 plot_ratio_mel_rho <- readRDS(here("outputs/figures/rds", "calibration_melanopic_vs_rhodopic.rds"))
 ```
 
-```{r}
+```{r assemble-final-calibration-plot}
 plot_irradiance_2 <- plot_irradiance + 
   labs(title = expression(bold("A ") * "Irradiance")) + 
   # guides(colour = "none") +
@@ -1213,14 +1212,14 @@ plot_all <- plot_irradiance_2 + plot_ratio_mel_pho_2 + plot_ratio_rho_pho_2 + pl
 plot_all
 ```
 
-```{r}
+```{r save-final-calibration-plot}
 formatted_save(here("outputs/figures", "calibration_light_metrics.png"), plot_all)
 save_rds_safe(plot_all, here("outputs", "figures", "rds", glue("calibration_light_metrics.rds")))
 ```
 
 # Generate a design matrix
 
-```{r}
+```{r generate-design-matrix}
 # -----------------------------
 # Generate DeBruijn sequences
 # -----------------------------
@@ -1370,7 +1369,7 @@ readr::write_csv(
 )
 ```
 
-```{r}
+```{r session-info}
 sessionInfo()
 ```
 

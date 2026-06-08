@@ -33,7 +33,7 @@ pupil_data_pp <- preprocess_pupil(
 )
 ```
 
-Now we can visualise what the data looks like aftr each preprocessing step
+Now we can visualise what the data looks like after each preprocessing step
 
 ```{r plotting}
 plot_raw <- plot_pupil(
