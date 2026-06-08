@@ -1,4 +1,4 @@
-**PCI-RR Stage 1 Manuscript: Bickerstaff et al., Objective and subjective assessment of light sensitivity in physiological responses to bright light in humans (2026)**
+**Communications Physchology Registered Report Stage 1 Manuscript: Bickerstaff et al., "Photoreceptor mechanisms underlying physiological responses to bright light in humans" (2026)**
 
 Exploratory analyses:
 
@@ -21,3 +21,7 @@ Exploratory analyses:
 4. Clustering of data
 
 - Principal Component Analysis (PCA) will be run on the data to identify potential clustering of physiological responses to bright light.
+
+5. Modelling of data
+
+- Responses will be modelled using all of melanopic EDI, rhodopic EDI, and photopic illuminance as fixed-effect predictors, to investigate how such a model distributes predictive power between the three metrics.
